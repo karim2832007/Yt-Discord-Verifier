@@ -261,3 +261,16 @@ scheduler.start()
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
+
+@app.route("/has_role/<discord_id>")
+def has_role(discord_id):
+    bot_headers = {"Authorization": f"Bot {DISCORD_BOT_TOKEN}"}
+    url = f"https://discord.com/api/guilds/{DISCORD_GUILD_ID}/members/{discord_id}"
+    r = requests.get(url, headers=bot_headers, timeout=20)
+
+    if r.status_code != 200:
+        return jsonify({"ok": False, "error": "User not found"}), 404
+
+    data = r.json()
+    has_role = DISCORD_ROLE_ID in data.get("roles", [])
+    return jsonify({"ok": True, "has_role": has_role})
