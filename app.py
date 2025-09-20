@@ -39,7 +39,6 @@ def require_session_fields(*keys):
 
 @app.route("/")
 def home():
-    # Start a fresh flow with a new code
     code = gen_code()
     session.clear()
     session["code"] = code
@@ -60,8 +59,6 @@ def google_login():
         return "Session expired", 400
 
     code = session["code"]
-
-    # Use v2 auth endpoint
     auth_url = (
         "https://accounts.google.com/o/oauth2/v2/auth"
         f"?client_id={GOOGLE_CLIENT_ID}"
@@ -79,12 +76,9 @@ def google_callback():
     if is_expired(session["created"]):
         return "Session expired", 400
 
-    # CSRF/state check
-    state = request.args.get("state")
-    if not state or state != session["code"]:
+    if request.args.get("state") != session["code"]:
         return "Invalid state", 400
 
-    # Exchange code for token
     code_param = request.args.get("code")
     if not code_param:
         return "Google auth failed", 400
@@ -113,7 +107,6 @@ def google_callback():
     while True:
         resp = requests.get(url, headers=headers, params=params, timeout=20).json()
         for item in resp.get("items", []):
-            # Some responses use 'resourceId' at snippet level; ensure keys exist safely
             res = item.get("snippet", {}).get("resourceId", {})
             if res.get("channelId") == YOUTUBE_CHANNEL_ID:
                 subscribed = True
@@ -143,7 +136,7 @@ def discord_login():
         "https://discord.com/api/oauth2/authorize"
         f"?client_id={DISCORD_CLIENT_ID}"
         f"&redirect_uri={DISCORD_REDIRECT}"
-        f"&response_type=code&scope=identify"
+        f"&response_type=code&scope=identify%20guilds.join"
         f"&state={code}"
     )
     return redirect(auth_url)
@@ -155,8 +148,7 @@ def discord_callback():
     if is_expired(session["created"]):
         return "Session expired", 400
 
-    state = request.args.get("state")
-    if not state or state != session["code"]:
+    if request.args.get("state") != session["code"]:
         return "Invalid state", 400
 
     code_param = request.args.get("code")
@@ -188,58 +180,49 @@ def discord_callback():
     if "id" not in user:
         return "Discord user fetch failed", 400
 
-    # Add role to member (requires the user already in the guild)
-    # If the member is not in the guild, this will 404; you may need a separate "Add to server" step with bot scope.
     bot_headers = {
         "Authorization": f"Bot {DISCORD_BOT_TOKEN}",
         "Content-Type": "application/json",
     }
-    role_url = (
-        f"https://discord.com/api/guilds/{DISCORD_GUILD_ID}"
-        f"/members/{user['id']}/roles/{DISCORD_ROLE_ID}"
-    )
 
+    # Ensure user is in the guild
+    add_url = f"https://discord.com/api/guilds/{DISCORD_GUILD_ID}/members/{user['id']}"
+    requests.put(add_url, headers=bot_headers, json={"access_token": token["access_token"]}, timeout=20)
+
+    # Assign the role
+    role_url = f"https://discord.com/api/guilds/{DISCORD_GUILD_ID}/members/{user['id']}/roles/{DISCORD_ROLE_ID}"
     r = requests.put(role_url, headers=bot_headers, timeout=20)
+
     if r.status_code in (204, 201):
         session["status"] = "done"
         session["discord_id"] = user["id"]
-        return render_template_string("""
-        <h3>Success! Role assigned.</h3>
-        <p>You can close this tab.</p>
-        """)
+        return render_template_string("<h3>Success! Role assigned.</h3><p>You can close this tab.</p>")
     else:
         session["status"] = "failed"
-        # Helpful error surface
         try:
             details = r.json()
         except Exception:
             details = {"error": r.text}
-        return (
-            render_template_string("""
-            <h3>Role assignment failed</h3>
-            <pre>Status: {{status}} | Body: {{body}}</pre>
-            """, status=r.status_code, body=details),
-            400,
-        )
+        return render_template_string(
+            "<h3>Role assignment failed</h3><pre>Status: {{status}} | Body: {{body}}</pre>",
+            status=r.status_code, body=details
+        ), 400
 
 @app.route("/status")
 def status_me():
-    # Returns the current session status for the active user
     if not require_session_fields("status"):
         return jsonify({"ok": False}), 404
-    payload = {
+    return jsonify({
         "ok": True,
         "status": session.get("status"),
         "discord_id": session.get("discord_id"),
         "code": session.get("code"),
         "created": session.get("created"),
         "expired": is_expired(session["created"]) if "created" in session else None,
-    }
-    return jsonify(payload), 200
+    }), 200
 
 @app.route("/status/<code>")
 def status_code(code):
-    # With session-only storage, we can only report the current user's flow
     if session.get("code") != code:
         return jsonify({"ok": False}), 404
     return jsonify({
