@@ -231,5 +231,33 @@ def status_code(code):
         "discord_id": session.get("discord_id"),
     }), 200
 
+from apscheduler.schedulers.background import BackgroundScheduler
+
+def remove_role_daily():
+    bot_headers = {
+        "Authorization": f"Bot {DISCORD_BOT_TOKEN}",
+        "Content-Type": "application/json",
+    }
+    # Get all members in the guild (max 1000 per request)
+    members_url = f"https://discord.com/api/guilds/{DISCORD_GUILD_ID}/members?limit=1000"
+    members = requests.get(members_url, headers=bot_headers, timeout=20).json()
+
+    removed_count = 0
+    for member in members:
+        if DISCORD_ROLE_ID in member.get("roles", []):
+            user_id = member["user"]["id"]
+            role_url = f"https://discord.com/api/guilds/{DISCORD_GUILD_ID}/members/{user_id}/roles/{DISCORD_ROLE_ID}"
+            r = requests.delete(role_url, headers=bot_headers, timeout=20)
+            if r.status_code == 204:
+                removed_count += 1
+
+    print(f"[Daily Job] Removed role from {removed_count} members.")
+
+# Schedule the job to run once every 24 hours
+scheduler = BackgroundScheduler()
+scheduler.add_job(remove_role_daily, "interval", days=1)
+scheduler.start()
+
+
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
