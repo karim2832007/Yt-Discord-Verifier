@@ -168,7 +168,7 @@ def discord_callback():
     token_req = requests.post(
         "https://discord.com/api/oauth2/token",
         data={
-            "client_id":     DISCORD_CLIENT_ID",
+            "client_id":     DISCORD_CLIENT_ID,
             "client_secret": DISCORD_CLIENT_SECRET",
             "grant_type":    "authorization_code",
             "code":          code_param",
