@@ -1,9 +1,7 @@
 # app.py
 #
-# Flask app for YouTube→Discord verification and daily role removal.
-# Use UptimeRobot to:
-#  1) Ping “/” every 5 minutes (to keep the app awake)
-#  2) Ping “/remove_roles_now” once a day (to trigger your daily cleanup)
+# Flask app for YouTube→Discord verification,
+# manual & scheduled role removal, and role checks.
 
 from flask import Flask, redirect, request, session, jsonify, render_template_string
 import os
@@ -170,11 +168,11 @@ def discord_callback():
     token_req = requests.post(
         "https://discord.com/api/oauth2/token",
         data={
-            "client_id":     DISCORD_CLIENT_ID,
-            "client_secret": DISCORD_CLIENT_SECRET,
+            "client_id":     DISCORD_CLIENT_ID",
+            "client_secret": DISCORD_CLIENT_SECRET",
             "grant_type":    "authorization_code",
-            "code":          code_param,
-            "redirect_uri":  DISCORD_REDIRECT,
+            "code":          code_param",
+            "redirect_uri":  DISCORD_REDIRECT",
         },
         headers={"Content-Type": "application/x-www-form-urlencoded"},
         timeout=20,
@@ -197,7 +195,7 @@ def discord_callback():
         "Content-Type":  "application/json",
     }
 
-    # Add the user to the guild (if they’re not already a member)
+    # Ensure user is in the guild
     add_url = (
         f"https://discord.com/api/guilds/{DISCORD_GUILD_ID}"
         f"/members/{user['id']}"
@@ -268,12 +266,19 @@ def remove_role_daily():
         "Authorization": f"Bot {DISCORD_BOT_TOKEN}",
         "Content-Type":  "application/json",
     }
-    # Fetch up to 1000 guild members; paginate if needed for >1000 members.
-    members_url = (
-        f"https://discord.com/api/guilds/{DISCORD_GUILD_ID}"
-        "/members?limit=1000"
-    )
-    members = requests.get(members_url, headers=bot_headers, timeout=20).json()
+
+    members_url = f"https://discord.com/api/guilds/{DISCORD_GUILD_ID}/members?limit=1000"
+    response = requests.get(members_url, headers=bot_headers, timeout=20)
+
+    try:
+        members = response.json()
+    except Exception:
+        print("[Role Removal] Failed to parse member list:", response.text)
+        return
+
+    if not isinstance(members, list):
+        print("[Role Removal] Unexpected response format:", members)
+        return
 
     removed_count = 0
     for member in members:
@@ -293,7 +298,7 @@ def remove_role_daily():
 def remove_roles_now():
     """
     Trigger role removal immediately.
-    Point UptimeRobot’s daily monitor to this URL.
+    Configure UptimeRobot to ping this endpoint once per day.
     """
     remove_role_daily()
     return "Role removal triggered.", 200
