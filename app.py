@@ -169,10 +169,10 @@ def discord_callback():
         "https://discord.com/api/oauth2/token",
         data={
             "client_id":     DISCORD_CLIENT_ID,
-            "client_secret": DISCORD_CLIENT_SECRET",
+            "client_secret": DISCORD_CLIENT_SECRET,
             "grant_type":    "authorization_code",
-            "code":          code_param",
-            "redirect_uri":  DISCORD_REDIRECT",
+            "code":          code_param,
+            "redirect_uri":  DISCORD_REDIRECT,
         },
         headers={"Content-Type": "application/x-www-form-urlencoded"},
         timeout=20,
