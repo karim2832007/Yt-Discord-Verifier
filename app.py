@@ -1,7 +1,8 @@
 # app.py
 #
-# Flask app for YouTube→Discord verification,
-# manual & scheduled role removal, and role checks.
+# Flask app for YouTube → Discord verification,
+# manual & scheduled role removal, role checks,
+# and a futuristic “Gaming Mods” landing page.
 
 from flask import Flask, redirect, request, session, jsonify, render_template_string
 import os
@@ -17,57 +18,155 @@ app = Flask(__name__)
 app.secret_key = os.environ["SECRET_KEY"]
 
 # ─── Configuration ────────────────────────────────────────────────────────────
-BASE_URL            = os.environ["BASE_URL"].rstrip("/")
-YOUTUBE_CHANNEL_ID  = os.environ["YOUTUBE_CHANNEL_ID"]
+BASE_URL = os.environ["BASE_URL"].rstrip("/")
+YOUTUBE_CHANNEL_ID = os.environ["YOUTUBE_CHANNEL_ID"]
 
-GOOGLE_CLIENT_ID     = os.environ["GOOGLE_CLIENT_ID"]
+GOOGLE_CLIENT_ID = os.environ["GOOGLE_CLIENT_ID"]
 GOOGLE_CLIENT_SECRET = os.environ["GOOGLE_CLIENT_SECRET"]
-GOOGLE_REDIRECT      = os.environ["GOOGLE_REDIRECT"]
+GOOGLE_REDIRECT = os.environ["GOOGLE_REDIRECT"]
 
-DISCORD_CLIENT_ID     = os.environ["DISCORD_CLIENT_ID"]
+DISCORD_CLIENT_ID = os.environ["DISCORD_CLIENT_ID"]
 DISCORD_CLIENT_SECRET = os.environ["DISCORD_CLIENT_SECRET"]
-DISCORD_REDIRECT      = os.environ["DISCORD_REDIRECT"]
-DISCORD_GUILD_ID      = os.environ["DISCORD_GUILD_ID"]
-DISCORD_ROLE_ID       = os.environ["DISCORD_ROLE_ID"]
-DISCORD_BOT_TOKEN     = os.environ["DISCORD_BOT_TOKEN"]
+DISCORD_REDIRECT = os.environ["DISCORD_REDIRECT"]
+DISCORD_GUILD_ID = os.environ["DISCORD_GUILD_ID"]
+DISCORD_ROLE_ID = os.environ["DISCORD_ROLE_ID"]
+DISCORD_BOT_TOKEN = os.environ["DISCORD_BOT_TOKEN"]
 
 # ─── Settings ────────────────────────────────────────────────────────────────
 CODE_TTL = 15 * 60  # seconds
 
+
 def now() -> int:
     return int(time.time())
 
-def gen_code(n=6) -> str:
+
+def gen_code(n: int = 6) -> str:
     return "".join(secrets.choice(string.digits) for _ in range(n))
+
 
 def is_expired(created_ts: int) -> bool:
     return now() - created_ts > CODE_TTL
 
+
 def require_session_fields(*keys) -> bool:
     return all(k in session and session[k] is not None for k in keys)
 
-# ─── YouTube → Discord OAuth Flow ────────────────────────────────────────────
+
+# ─── Landing Page: Gaming Mods Hologram UI ──────────────────────────────────
 @app.route("/")
 def home():
-    code = gen_code()
     session.clear()
-    session["code"]    = code
-    session["created"] = now()
-    session["status"]  = "pending"
-
     return render_template_string("""
-    <h2>YouTube → Discord verification</h2>
-    <p>Your code: <b>{{code}}</b></p>
-    <p>This code expires in 15 minutes.</p>
-    <a href="{{ google_url }}">Login with Google</a>
-    """, code=code, google_url=f"{BASE_URL}/google/login")
+    <html>
+    <head>
+        <link rel="icon" href="{{ url_for('static', filename='favicon.ico') }}" type="image/x-icon">
+        <title>Gaming Mods Youtube Subs</title>
+        <style>
+            body {
+                margin: 0;
+                padding: 0;
+                background: radial-gradient(circle at center, #0f0f0f, #000000);
+                font-family: 'Segoe UI', sans-serif;
+                color: #eee;
+                overflow: hidden;
+            }
+            .container {
+                display: flex;
+                flex-direction: column;
+                align-items: center;
+                justify-content: center;
+                height: 100vh;
+                animation: fadeIn 2s ease-in-out;
+            }
+            .glow-title {
+                font-size: 60px;
+                font-weight: bold;
+                font-style: italic;
+                color: #FFD700;
+                text-shadow:
+                    0 0 10px #B8860B,
+                    0 0 20px #B8860B,
+                    0 0 30px #FFD700,
+                    0 0 40px #FFD700;
+                animation: slideDown 1.5s ease-out;
+            }
+            .login-button {
+                margin-top: 40px;
+                padding: 15px 30px;
+                font-size: 20px;
+                font-weight: bold;
+                color: #111;
+                background: linear-gradient(135deg, #FFD700, #FFC300);
+                border: none;
+                border-radius: 12px;
+                box-shadow: 0 0 15px #B8860B;
+                cursor: pointer;
+                animation: slideUp 1.5s ease-out;
+                transition: transform 0.3s ease;
+            }
+            .login-button:hover {
+                transform: scale(1.05);
+                box-shadow: 0 0 25px #FFD700;
+            }
+            .hologram {
+                position: absolute;
+                top: 0;
+                left: 0;
+                width: 100%;
+                height: 100%;
+                pointer-events: none;
+                background: repeating-linear-gradient(
+                    45deg,
+                    rgba(255, 215, 0, 0.05),
+                    rgba(255, 215, 0, 0.05) 2px,
+                    transparent 2px,
+                    transparent 4px
+                );
+                animation: shimmer 10s linear infinite;
+                opacity: 0.2;
+            }
+            @keyframes fadeIn {
+                from { opacity: 0; }
+                to { opacity: 1; }
+            }
+            @keyframes slideDown {
+                from { transform: translateY(-100px); opacity: 0; }
+                to { transform: translateY(0); opacity: 1; }
+            }
+            @keyframes slideUp {
+                from { transform: translateY(100px); opacity: 0; }
+                to { transform: translateY(0); opacity: 1; }
+            }
+            @keyframes shimmer {
+                from { background-position: 0 0; }
+                to { background-position: 1000px 1000px; }
+            }
+        </style>
+    </head>
+    <body>
+        <div class="hologram"></div>
+        <div class="container">
+            <div class="glow-title">Gaming Mods</div>
+            <a href="{{ google_url }}">
+                <button class="login-button">Login with Google</button>
+            </a>
+        </div>
+    </body>
+    </html>
+    """, google_url=f"{BASE_URL}/google/login")
 
+
+# ─── YouTube → Discord OAuth Flow ────────────────────────────────────────────
 @app.route("/google/login")
 def google_login():
-    if not require_session_fields("code", "created", "status"):
+    code = gen_code()
+    session.clear()
+    session["code"] = code
+    session["created"] = now()
+    session["status"] = "pending"
+
+    if is_expired(session["created"]) or not require_session_fields("code", "created", "status"):
         return "Invalid session", 400
-    if is_expired(session["created"]):
-        return "Session expired", 400
 
     state = session["code"]
     auth_url = (
@@ -79,6 +178,7 @@ def google_login():
         f"&state={state}"
     )
     return redirect(auth_url)
+
 
 @app.route("/google/callback")
 def google_callback():
@@ -110,15 +210,15 @@ def google_callback():
         return "Google auth failed", 400
 
     headers = {"Authorization": f"Bearer {token_req['access_token']}"}
-    url     = "https://www.googleapis.com/youtube/v3/subscriptions"
-    params  = {"part": "snippet", "mine": "true", "maxResults": 50}
+    url = "https://www.googleapis.com/youtube/v3/subscriptions"
+    params = {"part": "snippet", "mine": "true", "maxResults": 50}
 
     subscribed = False
     while True:
         resp = requests.get(url, headers=headers, params=params, timeout=20).json()
         for item in resp.get("items", []):
-            res = item.get("snippet", {}).get("resourceId", {})
-            if res.get("channelId") == YOUTUBE_CHANNEL_ID:
+            resource = item.get("snippet", {}).get("resourceId", {})
+            if resource.get("channelId") == YOUTUBE_CHANNEL_ID:
                 subscribed = True
                 break
         if subscribed or "nextPageToken" not in resp:
@@ -131,6 +231,7 @@ def google_callback():
 
     session["status"] = "yt_ok"
     return redirect(f"{BASE_URL}/discord/login")
+
 
 @app.route("/discord/login")
 def discord_login():
@@ -152,6 +253,7 @@ def discord_login():
     )
     return redirect(auth_url)
 
+
 @app.route("/discord/callback")
 def discord_callback():
     if not require_session_fields("code", "created", "status"):
@@ -168,11 +270,11 @@ def discord_callback():
     token_req = requests.post(
         "https://discord.com/api/oauth2/token",
         data={
-            "client_id":     DISCORD_CLIENT_ID,
+            "client_id": DISCORD_CLIENT_ID,
             "client_secret": DISCORD_CLIENT_SECRET,
-            "grant_type":    "authorization_code",
-            "code":          code_param,
-            "redirect_uri":  DISCORD_REDIRECT,
+            "grant_type": "authorization_code",
+            "code": code_param,
+            "redirect_uri": DISCORD_REDIRECT,
         },
         headers={"Content-Type": "application/x-www-form-urlencoded"},
         timeout=20,
@@ -192,7 +294,7 @@ def discord_callback():
 
     bot_headers = {
         "Authorization": f"Bot {DISCORD_BOT_TOKEN}",
-        "Content-Type":  "application/json",
+        "Content-Type": "application/json",
     }
 
     # Ensure user is in the guild
@@ -200,22 +302,18 @@ def discord_callback():
         f"https://discord.com/api/guilds/{DISCORD_GUILD_ID}"
         f"/members/{user['id']}"
     )
-    requests.put(
-        add_url,
-        headers=bot_headers,
-        json={"access_token": token_req["access_token"]},
-        timeout=20,
-    )
+    requests.put(add_url, headers=bot_headers,
+                 json={"access_token": token_req["access_token"]}, timeout=20)
 
     # Assign the verification role
     role_url = (
         f"https://discord.com/api/guilds/{DISCORD_GUILD_ID}"
         f"/members/{user['id']}/roles/{DISCORD_ROLE_ID}"
     )
-    r = requests.put(role_url, headers=bot_headers, timeout=20)
+    resp = requests.put(role_url, headers=bot_headers, timeout=20)
 
-    if r.status_code in (204, 201):
-        session["status"]     = "done"
+    if resp.status_code in (204, 201):
+        session["status"] = "done"
         session["discord_id"] = user["id"]
         return render_template_string(
             "<h3>Success! Role assigned.</h3><p>You can close this tab.</p>"
@@ -223,51 +321,56 @@ def discord_callback():
     else:
         session["status"] = "failed"
         try:
-            details = r.json()
+            details = resp.json()
         except:
-            details = {"error": r.text}
+            details = {"error": resp.text}
         return (
             render_template_string(
                 "<h3>Role assignment failed</h3>"
                 "<pre>Status: {{status}} | Body: {{body}}</pre>",
-                status=r.status_code,
+                status=resp.status_code,
                 body=details,
             ),
             400,
         )
 
-# ─── Status Endpoints ───────────────────────────────────────────────────────
+
+# ─── Status Endpoints ────────────────────────────────────────────────────────
 @app.route("/status")
 def status_me():
     if not require_session_fields("status"):
         return jsonify({"ok": False}), 404
     return jsonify({
-        "ok":         True,
-        "status":     session.get("status"),
+        "ok": True,
+        "status": session.get("status"),
         "discord_id": session.get("discord_id"),
-        "code":       session.get("code"),
-        "created":    session.get("created"),
-        "expired":    is_expired(session["created"])
+        "code": session.get("code"),
+        "created": session.get("created"),
+        "expired": is_expired(session["created"])
     }), 200
+
 
 @app.route("/status/<code>")
 def status_code(code):
     if session.get("code") != code:
         return jsonify({"ok": False}), 404
     return jsonify({
-        "ok":         True,
-        "status":     session.get("status"),
+        "ok": True,
+        "status": session.get("status"),
         "discord_id": session.get("discord_id"),
     }), 200
+
 
 # ─── Role Removal Logic ──────────────────────────────────────────────────────
 def remove_role_daily():
     bot_headers = {
         "Authorization": f"Bot {DISCORD_BOT_TOKEN}",
-        "Content-Type":  "application/json",
+        "Content-Type": "application/json",
     }
-
-    members_url = f"https://discord.com/api/guilds/{DISCORD_GUILD_ID}/members?limit=1000"
+    members_url = (
+        f"https://discord.com/api/guilds/{DISCORD_GUILD_ID}"
+        "/members?limit=1000"
+    )
     response = requests.get(members_url, headers=bot_headers, timeout=20)
 
     try:
@@ -288,11 +391,12 @@ def remove_role_daily():
                 f"https://discord.com/api/guilds/{DISCORD_GUILD_ID}"
                 f"/members/{user_id}/roles/{DISCORD_ROLE_ID}"
             )
-            resp = requests.delete(role_url, headers=bot_headers, timeout=20)
-            if resp.status_code == 204:
+            res = requests.delete(role_url, headers=bot_headers, timeout=20)
+            if res.status_code == 204:
                 removed_count += 1
 
     print(f"[Role Removal] Removed role from {removed_count} members.")
+
 
 @app.route("/remove_roles_now")
 def remove_roles_now():
@@ -302,6 +406,7 @@ def remove_roles_now():
     """
     remove_role_daily()
     return "Role removal triggered.", 200
+
 
 # ─── Role Check Endpoint ─────────────────────────────────────────────────────
 @app.route("/has_role/<discord_id>")
@@ -316,9 +421,10 @@ def has_role(discord_id):
     if r.status_code != 200:
         return jsonify({"ok": False, "error": "User not found"}), 404
 
-    data     = r.json()
+    data = r.json()
     has_role = DISCORD_ROLE_ID in data.get("roles", [])
     return jsonify({"ok": True, "has_role": has_role})
+
 
 # ─── App Runner ───────────────────────────────────────────────────────────────
 if __name__ == "__main__":
