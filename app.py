@@ -1,23 +1,24 @@
-# app.py
-#
-# Flask app for YouTube → Discord verification,
-# holographic “Gaming Mods” UI, manual & scheduled role removal,
-# and role check endpoint.
-
 import os
 import time
 import secrets
 import string
 import requests
 from dotenv import load_dotenv
-from flask import Flask, redirect, request, session, jsonify, render_template_string, url_for
+from flask import (
+    Flask, redirect, request, session,
+    jsonify, render_template_string, url_for
+)
 
+#───────────────────────────────────────────────────────────────────────────────
+# Load environment
+#───────────────────────────────────────────────────────────────────────────────
 load_dotenv()
-
 app = Flask(__name__)
 app.secret_key = os.environ["SECRET_KEY"]
 
-# ─── Configuration ────────────────────────────────────────────────────────────
+#───────────────────────────────────────────────────────────────────────────────
+# Configuration
+#───────────────────────────────────────────────────────────────────────────────
 BASE_URL            = os.environ["BASE_URL"].rstrip("/")
 YOUTUBE_CHANNEL_ID  = os.environ["YOUTUBE_CHANNEL_ID"]
 
@@ -32,9 +33,15 @@ DISCORD_GUILD_ID      = os.environ["DISCORD_GUILD_ID"]
 DISCORD_ROLE_ID       = os.environ["DISCORD_ROLE_ID"]
 DISCORD_BOT_TOKEN     = os.environ["DISCORD_BOT_TOKEN"]
 
-# ─── Settings ────────────────────────────────────────────────────────────────
-CODE_TTL = 15 * 60  # OAuth state TTL in seconds
+#───────────────────────────────────────────────────────────────────────────────
+# Timeouts
+#───────────────────────────────────────────────────────────────────────────────
+CODE_TTL        = 15 * 60         # OAuth state TTL (15 minutes)
+ACTIVATION_TTL  = 24 * 60 * 60    # Role validity (24 hours)
 
+#───────────────────────────────────────────────────────────────────────────────
+# Helpers
+#───────────────────────────────────────────────────────────────────────────────
 def now() -> int:
     return int(time.time())
 
@@ -47,21 +54,22 @@ def is_expired(ts: int) -> bool:
 def require_session_fields(*keys) -> bool:
     return all(k in session and session[k] is not None for k in keys)
 
-# ─── Success / Error Page Templates ──────────────────────────────────────────
+#───────────────────────────────────────────────────────────────────────────────
+# Success / Error Page Templates
+#───────────────────────────────────────────────────────────────────────────────
 def _success_page():
     return """
 <!DOCTYPE html>
 <html lang="en">
-<head>
-  <meta charset="utf-8"><title>Success</title>
-  <link rel="icon" href="{{ url_for('static', filename='favicon.ico') }}">
-  <style>
-    body, html { width:100%; height:100%; margin:0; background:#000; color:#0f0;
-      display:flex; align-items:center; justify-content:center;
-      font-family:'Segoe UI',sans-serif; }
-    .box { text-align:center; }
-    .msg { font-size:2rem; text-shadow:0 0 10px #0f0; }
-  </style>
+<head><meta charset="utf-8"><title>Success</title>
+<link rel="icon" href="{{ url_for('static', filename='favicon.ico') }}">
+<style>
+  body, html { width:100%; height:100%; margin:0; background:#000; color:#0f0;
+    display:flex; align-items:center; justify-content:center;
+    font-family:'Segoe UI',sans-serif; }
+  .box { text-align:center; }
+  .msg { font-size:2rem; text-shadow:0 0 10px #0f0; }
+</style>
 </head>
 <body>
   <div class="box">
@@ -76,16 +84,15 @@ def _error_page():
     return """
 <!DOCTYPE html>
 <html lang="en">
-<head>
-  <meta charset="utf-8"><title>Error</title>
-  <link rel="icon" href="{{ url_for('static', filename='favicon.ico') }}">
-  <style>
-    body, html { width:100%; height:100%; margin:0; background:#000; color:#f00;
-      display:flex; align-items:center; justify-content:center;
-      font-family:'Segoe UI',sans-serif; }
-    .box { text-align:center; }
-    .msg { font-size:2rem; text-shadow:0 0 10px #f00; }
-  </style>
+<head><meta charset="utf-8"><title>Error</title>
+<link rel="icon" href="{{ url_for('static', filename='favicon.ico') }}">
+<style>
+  body, html { width:100%; height:100%; margin:0; background:#000; color:#f00;
+    display:flex; align-items:center; justify-content:center;
+    font-family:'Segoe UI',sans-serif; }
+  .box { text-align:center; }
+  .msg { font-size:2rem; text-shadow:0 0 10px #f00; }
+</style>
 </head>
 <body>
   <div class="box">
@@ -96,7 +103,9 @@ def _error_page():
 </html>
 """
 
-# ─── 1) Landing Page: Holographic UI ───────────────────────────────────────────
+#───────────────────────────────────────────────────────────────────────────────
+# 1) Landing Page: Holographic UI
+#───────────────────────────────────────────────────────────────────────────────
 @app.route("/")
 def home():
     session.clear()
@@ -107,10 +116,7 @@ def home():
     <meta charset="utf-8">
     <title>Gaming Mods Membership</title>
     <meta name="viewport" content="width=device-width,initial-scale=1">
-
-    <!-- FAVICON -->
     <link rel="icon" href="{{ url_for('static', filename='favicon.ico') }}" type="image/x-icon">
-
     <style>
       * { margin:0; padding:0; box-sizing:border-box; }
       body, html {
@@ -183,7 +189,9 @@ def home():
 </html>
     """, google_url=f"{BASE_URL}/google/login")
 
-# ─── 2) YouTube → Discord OAuth Flow ────────────────────────────────────────────
+#───────────────────────────────────────────────────────────────────────────────
+# 2) YouTube → Discord OAuth Flow
+#───────────────────────────────────────────────────────────────────────────────
 @app.route("/google/login")
 def google_login():
     code = gen_code()
@@ -191,7 +199,6 @@ def google_login():
     session["code"]    = code
     session["created"] = now()
     session["status"]  = "pending"
-
     auth_url = (
         "https://accounts.google.com/o/oauth2/v2/auth"
         f"?client_id={GOOGLE_CLIENT_ID}"
@@ -208,28 +215,26 @@ def google_callback():
         return "Session expired", 400
     if request.args.get("state") != session["code"]:
         return "Invalid state", 400
-
     code_param = request.args.get("code")
     if not code_param:
         return "Google auth failed", 400
 
-    token_req = requests.post(
+    token = requests.post(
         "https://oauth2.googleapis.com/token",
         data={
-            "client_id":     GOOGLE_CLIENT_ID,
+            "client_id": GOOGLE_CLIENT_ID,
             "client_secret": GOOGLE_CLIENT_SECRET,
-            "code":          code_param,
-            "redirect_uri":  GOOGLE_REDIRECT,
-            "grant_type":    "authorization_code"
+            "code": code_param,
+            "redirect_uri": GOOGLE_REDIRECT,
+            "grant_type": "authorization_code"
         },
         headers={"Content-Type":"application/x-www-form-urlencoded"},
         timeout=20
     ).json()
-
-    if "access_token" not in token_req:
+    if "access_token" not in token:
         return "Google auth failed", 400
 
-    headers = {"Authorization": f"Bearer {token_req['access_token']}"}
+    headers = {"Authorization": f"Bearer {token['access_token']}"}
     url     = "https://www.googleapis.com/youtube/v3/subscriptions"
     params  = {"part":"snippet","mine":"true","maxResults":50}
 
@@ -251,11 +256,14 @@ def google_callback():
     session["status"] = "yt_ok"
     return redirect(f"{BASE_URL}/discord/login")
 
-# ─── 3) Discord OAuth Login Page ───────────────────────────────────────────────
+#───────────────────────────────────────────────────────────────────────────────
+# 3) Discord OAuth Login Page (same style)
+#───────────────────────────────────────────────────────────────────────────────
 @app.route("/discord/login")
 def discord_login():
     code = session.get("code")
     if not code:
+        session.clear()
         code = gen_code()
     session["code"]    = code
     session["created"] = now()
@@ -277,8 +285,6 @@ def discord_login():
     <meta charset="utf-8">
     <title>Gaming Mods Membership</title>
     <meta name="viewport" content="width=device-width,initial-scale=1">
-
-    <!-- FAVICON -->
     <link rel="icon" href="{{ url_for('static', filename='favicon.ico') }}" type="image/x-icon">
 
     <style>
@@ -353,14 +359,15 @@ def discord_login():
 </html>
     """, discord_url=discord_auth_url)
 
-# ─── 4) Discord OAuth Callback ────────────────────────────────────────────────
+#───────────────────────────────────────────────────────────────────────────────
+# 4) Discord OAuth Callback
+#───────────────────────────────────────────────────────────────────────────────
 @app.route("/discord/callback")
 def discord_callback():
-    if not require_session_fields("code", "created", "status") or is_expired(session["created"]):
+    if not require_session_fields("code","created","status") or is_expired(session["created"]):
         return render_template_string(_error_page(), message="Session expired.")
     if request.args.get("state") != session["code"]:
         return render_template_string(_error_page(), message="Invalid state.")
-
     code_param = request.args.get("code")
     if not code_param:
         return render_template_string(_error_page(), message="Discord auth failed.")
@@ -368,16 +375,15 @@ def discord_callback():
     token_req = requests.post(
         "https://discord.com/api/oauth2/token",
         data={
-            "client_id":     DISCORD_CLIENT_ID,
+            "client_id": DISCORD_CLIENT_ID,
             "client_secret": DISCORD_CLIENT_SECRET,
-            "grant_type":    "authorization_code",
-            "code":          code_param,
-            "redirect_uri":  DISCORD_REDIRECT,
+            "grant_type": "authorization_code",
+            "code": code_param,
+            "redirect_uri": DISCORD_REDIRECT
         },
         headers={"Content-Type":"application/x-www-form-urlencoded"},
         timeout=20
     ).json()
-
     if "access_token" not in token_req:
         return render_template_string(_error_page(), message="Discord auth failed.")
 
@@ -386,15 +392,14 @@ def discord_callback():
         headers={"Authorization":f"Bearer {token_req['access_token']}"},
         timeout=20
     ).json()
-
     if "id" not in user:
         return render_template_string(_error_page(), message="Failed to fetch Discord user.")
 
     bot_headers = {
         "Authorization": f"Bot {DISCORD_BOT_TOKEN}",
-        "Content-Type":  "application/json",
+        "Content-Type": "application/json"
     }
-
+    # Join guild & assign role
     join_url = f"https://discord.com/api/guilds/{DISCORD_GUILD_ID}/members/{user['id']}"
     requests.put(join_url, headers=bot_headers,
                  json={"access_token": token_req["access_token"]}, timeout=20)
@@ -406,10 +411,26 @@ def discord_callback():
         session["activated_at"] = now()
         return render_template_string(_success_page(), username=user.get("username","User"))
     else:
-        detail = resp.json() if resp.headers.get("Content-Type","").startswith("application/json") else {"error":resp.text}
-        return render_template_string(_error_page(), message=f"Role assignment failed: {detail}")
+        detail = {}
+        if resp.headers.get("Content-Type","").startswith("application/json"):
+            detail = resp.json()
+        else:
+            detail = {"error": resp.text}
+        return render_template_string(
+            _error_page(),
+            message=f"Role assignment failed: {detail}"
+        )
 
-# ─── 5) Status & Role Removal Logic ───────────────────────────────────────────
+#───────────────────────────────────────────────────────────────────────────────
+# 5) Ren’Py Polling & Removal Endpoints
+#───────────────────────────────────────────────────────────────────────────────
+@app.route("/has_role_recent")
+def has_role_recent():
+    activated = session.get("activated_at")
+    expired   = not activated or (time.time() - activated > ACTIVATION_TTL)
+    has       = session.get("status") == "role_ok" and not expired
+    return jsonify({"ok": True, "has_role": has}), 200
+
 @app.route("/status")
 def status_me():
     if "status" not in session:
@@ -471,6 +492,8 @@ def has_role(discord_id):
     data = r.json()
     return jsonify({"ok": True, "has_role": DISCORD_ROLE_ID in data.get("roles", [])}), 200
 
-# ─── App Runner ───────────────────────────────────────────────────────────────
+#───────────────────────────────────────────────────────────────────────────────
+# Run the app
+#───────────────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
