@@ -21,6 +21,7 @@ app.secret_key = os.environ["SECRET_KEY"]
 #───────────────────────────────────────────────────────────────────────────────
 BASE_URL            = os.environ["BASE_URL"].rstrip("/")
 YOUTUBE_CHANNEL_ID  = os.environ["YOUTUBE_CHANNEL_ID"]
+ACTIVATION_WEBHOOK  = os.environ.get("ACTIVATION_WEBHOOK")
 
 GOOGLE_CLIENT_ID     = os.environ["GOOGLE_CLIENT_ID"]
 GOOGLE_CLIENT_SECRET = os.environ["GOOGLE_CLIENT_SECRET"]
@@ -53,6 +54,18 @@ def is_expired(ts: int) -> bool:
 
 def require_session_fields(*keys) -> bool:
     return all(k in session and session[k] is not None for k in keys)
+
+def log_activation(username: str):
+    if not ACTIVATION_WEBHOOK:
+        return
+    try:
+        requests.post(
+            ACTIVATION_WEBHOOK,
+            json={"content": f"✅ {username} was granted the YouTube Subscriber role."},
+            timeout=10
+        )
+    except Exception as e:
+        print("[Webhook] Failed to log activation:", e)
 
 #───────────────────────────────────────────────────────────────────────────────
 # Success / Error Page Templates
@@ -190,7 +203,7 @@ def home():
     """, google_url=f"{BASE_URL}/google/login")
 
 #───────────────────────────────────────────────────────────────────────────────
-# 2) YouTube → Discord OAuth Flow
+# 2) Google OAuth → YouTube Subscription Check
 #───────────────────────────────────────────────────────────────────────────────
 @app.route("/google/login")
 def google_login():
@@ -286,7 +299,6 @@ def discord_login():
     <title>Gaming Mods Membership</title>
     <meta name="viewport" content="width=device-width,initial-scale=1">
     <link rel="icon" href="{{ url_for('static', filename='favicon.ico') }}" type="image/x-icon">
-
     <style>
       * { margin:0; padding:0; box-sizing:border-box; }
       body, html {
@@ -389,7 +401,7 @@ def discord_callback():
 
     user = requests.get(
         "https://discord.com/api/users/@me",
-        headers={"Authorization":f"Bearer {token_req['access_token']}"},
+        headers={"Authorization": f"Bearer {token_req['access_token']}"},
         timeout=20
     ).json()
     if "id" not in user:
@@ -409,10 +421,11 @@ def discord_callback():
     if resp.status_code in (204, 201):
         session["status"]       = "role_ok"
         session["activated_at"] = now()
+        log_activation(user.get("username", "User"))
         return render_template_string(_success_page(), username=user.get("username","User"))
     else:
         detail = {}
-        if resp.headers.get("Content-Type","").startswith("application/json"):
+        if resp.headers.get("Content-Type", "").startswith("application/json"):
             detail = resp.json()
         else:
             detail = {"error": resp.text}
@@ -449,7 +462,10 @@ def status_code(code):
     return jsonify({"ok": True, "status": session["status"]}), 200
 
 def remove_role_daily():
-    bot_headers = {"Authorization":f"Bot {DISCORD_BOT_TOKEN}", "Content-Type":"application/json"}
+    bot_headers = {
+        "Authorization": f"Bot {DISCORD_BOT_TOKEN}",
+        "Content-Type":"application/json"
+    }
     r = requests.get(
         f"https://discord.com/api/guilds/{DISCORD_GUILD_ID}/members?limit=1000",
         headers=bot_headers, timeout=20
@@ -485,7 +501,7 @@ def remove_roles_now():
 def has_role(discord_id):
     r = requests.get(
         f"https://discord.com/api/guilds/{DISCORD_GUILD_ID}/members/{discord_id}",
-        headers={"Authorization":f"Bot {DISCORD_BOT_TOKEN}"}, timeout=20
+        headers={"Authorization": f"Bot {DISCORD_BOT_TOKEN}"}, timeout=20
     )
     if r.status_code != 200:
         return jsonify({"ok": False, "error": "User not found"}), 404
