@@ -60,59 +60,13 @@ def require_session_fields(*keys) -> bool:
     return all(k in session and session[k] is not None for k in keys)
 
 #───────────────────────────────────────────────────────────────────────────────
-# Success / Error Page Templates
+# HTML Templates
 #───────────────────────────────────────────────────────────────────────────────
-def _success_page():
-    return """
-<!DOCTYPE html>
-<html lang="en"><head><meta charset="utf-8"><title>Success</title>
-<link rel="icon" href="{{ url_for('static', filename='favicon.ico') }}">
-<style>
-  body, html { width:100%; height:100%; margin:0; background:#000; color:#0f0;
-    display:flex; align-items:center; justify-content:center;
-    font-family:'Segoe UI',sans-serif; }
-  .box { text-align:center; }
-  .msg { font-size:2rem; text-shadow:0 0 10px #0f0; }
-</style>
-</head><body>
-  <div class="box">
-    <p class="msg">✅ Success! You have the subscriber role.</p>
-    <p>You can close this tab now.</p>
-  </div>
-</body></html>
-"""
-
-def _error_page():
-    return """
-<!DOCTYPE html>
-<html lang="en"><head><meta charset="utf-8"><title>Error</title>
-<link rel="icon" href="{{ url_for('static', filename='favicon.ico') }}">
-<style>
-  body, html { width:100%; height:100%; margin:0; background:#000; color:#f00;
-    display:flex; align-items:center; justify-content:center;
-    font-family:'Segoe UI',sans-serif; }
-  .box { text-align:center; }
-  .msg { font-size:2rem; text-shadow:0 0 10px #f00; }
-</style>
-</head><body>
-  <div class="box">
-    <p class="msg">❌ {{ message }}</p>
-    <p>Please try again or contact support.</p>
-  </div>
-</body></html>
-"""
-
-#───────────────────────────────────────────────────────────────────────────────
-# 1) Landing Page: Holographic UI
-#───────────────────────────────────────────────────────────────────────────────
-@app.route("/")
-def home():
-    session.clear()
-    return render_template_string("""
+INDEX_HTML = """
 <!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8"><title>Gaming Mods Membership</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<link rel="icon" href="{{ url_for('static', filename='favicon.ico') }}" type="image/x-icon">
+<link rel="icon" href="{{ url_for('static', filename='favicon.ico') }}">
 <style>
   * { margin:0; padding:0; box-sizing:border-box; }
   body, html { width:100%; height:100%; overflow:hidden;
@@ -153,10 +107,57 @@ def home():
     </button>
   </section>
 </body></html>
-""", google_url=f"{BASE_URL}/google/login")
+"""
+
+SUCCESS_HTML = """
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><title>Success</title>
+<link rel="icon" href="{{ url_for('static', filename='favicon.ico') }}">
+<style>
+  body, html { width:100%; height:100%; margin:0; background:#000; color:#0f0;
+    display:flex; align-items:center; justify-content:center; font-family:'Segoe UI',sans-serif; }
+  .box { text-align:center; }
+  .msg { font-size:2rem; text-shadow:0 0 10px #0f0; }
+</style>
+</head><body>
+  <div class="box">
+    <p class="msg">✅ Success! You have the subscriber role.</p>
+    <p>You can close this tab now.</p>
+  </div>
+</body></html>
+"""
+
+ERROR_HTML = """
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><title>Error</title>
+<link rel="icon" href="{{ url_for('static', filename='favicon.ico') }}">
+<style>
+  body, html { width:100%; height:100%; margin:0; background:#000; color:#f00;
+    display:flex; align-items:center; justify-content:center; font-family:'Segoe UI',sans-serif; }
+  .box { text-align:center; }
+  .msg { font-size:2rem; text-shadow:0 0 10px #f00; }
+</style>
+</head><body>
+  <div class="box">
+    <p class="msg">❌ {{ message }}</p>
+    <p>Please try again or contact support.</p>
+  </div>
+</body></html>
+"""
 
 #───────────────────────────────────────────────────────────────────────────────
-# 2) Google → YouTube Subscription Check
+# Root landing page
+#───────────────────────────────────────────────────────────────────────────────
+@app.route("/")
+def home():
+    session.clear()
+    return render_template_string(
+        INDEX_HTML,
+        google_url=f"{BASE_URL}/google/login"
+    )
+
+#───────────────────────────────────────────────────────────────────────────────
+# 2) Google → YouTube Subscription
 #───────────────────────────────────────────────────────────────────────────────
 @app.route("/google/login")
 def google_login():
@@ -178,7 +179,7 @@ def google_login():
 
 @app.route("/google/callback")
 def google_callback():
-    if not require_session_fields("code", "created", "status") or is_expired(session["created"]):
+    if not require_session_fields("code","created","status") or is_expired(session["created"]):
         return "Session expired", 400
     if request.args.get("state") != session["code"]:
         return "Invalid state", 400
@@ -204,7 +205,7 @@ def google_callback():
 
     headers = {"Authorization": f"Bearer {token['access_token']}"}
     url     = "https://www.googleapis.com/youtube/v3/subscriptions"
-    params  = {"part":"snippet", "mine":"true", "maxResults":50}
+    params  = {"part":"snippet","mine":"true","maxResults":50}
 
     subscribed = False
     while True:
@@ -220,17 +221,17 @@ def google_callback():
 
     if not subscribed:
         session["status"] = "failed"
-        return render_template_string(_error_page(), message="YouTube subscription not found.")
+        return render_template_string(ERROR_HTML, message="YouTube subscription not found.")
     session["status"] = "yt_ok"
     return redirect(f"{BASE_URL}/discord/login")
 
 #───────────────────────────────────────────────────────────────────────────────
-# 3) Discord OAuth Login (post-YT)
+# 3) Discord OAuth Login
 #───────────────────────────────────────────────────────────────────────────────
 @app.route("/discord/login")
 def discord_login():
     if session.get("status") != "yt_ok":
-        return render_template_string(_error_page(), message="You must verify YouTube first."), 400
+        return render_template_string(ERROR_HTML, message="You must verify YouTube first."), 400
 
     state = session["code"]
     discord_auth_url = (
@@ -244,18 +245,18 @@ def discord_login():
     return redirect(discord_auth_url)
 
 #───────────────────────────────────────────────────────────────────────────────
-# 4) Discord OAuth Callback & Role Assignment
+# 4) Discord Callback & Role Assignment
 #───────────────────────────────────────────────────────────────────────────────
 @app.route("/discord/callback")
 def discord_callback():
-    if not require_session_fields("code", "created", "status") or is_expired(session["created"]):
-        return render_template_string(_error_page(), message="Session expired.")
+    if not require_session_fields("code","created","status") or is_expired(session["created"]):
+        return render_template_string(ERROR_HTML, message="Session expired.")
     if request.args.get("state") != session["code"]:
-        return render_template_string(_error_page(), message="Invalid state.")
+        return render_template_string(ERROR_HTML, message="Invalid state.")
 
     code_param = request.args.get("code")
     if not code_param:
-        return render_template_string(_error_page(), message="Discord auth failed.")
+        return render_template_string(ERROR_HTML, message="Discord auth failed.")
 
     token_req = requests.post(
         "https://discord.com/api/oauth2/token",
@@ -270,7 +271,7 @@ def discord_callback():
         timeout=20
     ).json()
     if "access_token" not in token_req:
-        return render_template_string(_error_page(), message="Discord auth failed.")
+        return render_template_string(ERROR_HTML, message="Discord auth failed.")
 
     user = requests.get(
         "https://discord.com/api/users/@me",
@@ -278,16 +279,14 @@ def discord_callback():
         timeout=20
     ).json()
     if "id" not in user:
-        return render_template_string(_error_page(), message="Failed to fetch Discord user.")
+        return render_template_string(ERROR_HTML, message="Failed to fetch Discord user.")
 
     bot_headers = {
         "Authorization": f"Bot {DISCORD_BOT_TOKEN}",
         "Content-Type": "application/json"
     }
-    join_url = (
-        f"https://discord.com/api/guilds/{DISCORD_GUILD_ID}"
-        f"/members/{user['id']}"
-    )
+    # Join guild (if needed) + assign role
+    join_url = f"https://discord.com/api/guilds/{DISCORD_GUILD_ID}/members/{user['id']}"
     requests.put(join_url, headers=bot_headers,
                  json={"access_token": token_req["access_token"]}, timeout=20)
     role_url = (
@@ -299,10 +298,10 @@ def discord_callback():
     if resp.status_code in (204, 201):
         session["status"]       = "role_ok"
         session["activated_at"] = now()
-        return render_template_string(_success_page())
+        return render_template_string(SUCCESS_HTML)
     else:
-        detail = resp.json() if resp.headers.get("Content-Type", "").startswith("application/json") else {"error": resp.text}
-        return render_template_string(_error_page(), message=f"Role assignment failed: {detail}")
+        detail = resp.json() if resp.headers.get("Content-Type","").startswith("application/json") else {"error": resp.text}
+        return render_template_string(ERROR_HTML, message=f"Role assignment failed: {detail}")
 
 #───────────────────────────────────────────────────────────────────────────────
 # 5) Ren’Py Polling & Misc Endpoints
