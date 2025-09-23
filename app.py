@@ -6,17 +6,13 @@ import logging
 
 import requests
 from dotenv import load_dotenv
-from flask import (
-    Flask, redirect, request,
-    jsonify, render_template_string
-)
+from flask import Flask, redirect, request, jsonify, render_template_string
 
 #───────────────────────────────────────────────────────────────────────────────
 # Setup & Configuration
 #───────────────────────────────────────────────────────────────────────────────
 load_dotenv()
 
-# Enable basic console logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
 app = Flask(__name__, static_folder="static", static_url_path="/static")
@@ -36,12 +32,13 @@ DISCORD_GUILD_ID      = os.getenv("DISCORD_GUILD_ID")
 DISCORD_ROLE_ID       = os.getenv("DISCORD_ROLE_ID")
 DISCORD_BOT_TOKEN     = os.getenv("DISCORD_BOT_TOKEN")
 
-# in‐memory state
-pending_activations = {}  # code → {created_at, yt_verified, discord_id, role_granted}
+# In-memory activation store:
+# code → { created_at, yt_verified, discord_id, role_granted, role_time }
+pending_activations = {}
 
-# time‐to‐live
-CODE_TTL       = 15 * 60       # seconds until Google step expires
-ACTIVATION_TTL = 24 * 60 * 60  # seconds until role link expires
+# Time-to-live settings
+CODE_TTL       = 15 * 60    # 15 min to complete YouTube step
+ACTIVATION_TTL = 15 * 60    # 15 min to use your Discord ID in-game
 
 #───────────────────────────────────────────────────────────────────────────────
 # Helpers
@@ -49,51 +46,47 @@ ACTIVATION_TTL = 24 * 60 * 60  # seconds until role link expires
 def now() -> int:
     return int(time.time())
 
-def gen_code(length: int = 6) -> str:
-    return "".join(secrets.choice(string.digits) for _ in range(length))
+def gen_code(n: int = 6) -> str:
+    return "".join(secrets.choice(string.digits) for _ in range(n))
 
 def is_expired(timestamp: int, ttl: int) -> bool:
     return (now() - timestamp) > ttl
 
 #───────────────────────────────────────────────────────────────────────────────
-# Holographic theme + larger text sizes
+# Holographic theme + enlarged text
 #───────────────────────────────────────────────────────────────────────────────
 BASE_STYLE = """
 <link rel="icon" href="/static/favicon.ico">
 <style>
   * { margin:0; padding:0; box-sizing:border-box; }
-  body, html { 
-    width:100%; height:100%; overflow:hidden; 
-    background:#0a0a0a; color:#eee; 
-    font-family:'Segoe UI', sans-serif; 
-    font-size:18px; 
+  body,html {
+    width:100%; height:100%; overflow:hidden;
+    background:#0a0a0a; color:#eee;
+    font-family:'Segoe UI',sans-serif; font-size:18px;
   }
   .hero {
     position:relative; display:flex; flex-direction:column;
-    align-items:center; justify-content:center; 
+    align-items:center; justify-content:center;
     width:100%; height:100vh;
-    background:radial-gradient(circle at center, #111 0%, #000 80%);
+    background:radial-gradient(circle at center,#111 0%,#000 80%);
   }
-  /* CSS‐only holo grid overlay */
   .hero::before {
     content:""; position:absolute; top:0; left:0;
     width:100%; height:100%;
     background:
-      linear-gradient(rgba(255,255,255,0.05) 1px, transparent 1px) 0 0,
-      linear-gradient(90deg, rgba(255,255,255,0.05) 1px, transparent 1px) 0 0;
-    background-size:50px 50px;
-    opacity:0.1; animation:shiftGrid 30s linear infinite;
+      linear-gradient(rgba(255,255,255,0.05) 1px,transparent 1px) 0 0,
+      linear-gradient(90deg,rgba(255,255,255,0.05) 1px,transparent 1px) 0 0;
+    background-size:50px 50px; opacity:0.1;
+    animation:shiftGrid 30s linear infinite;
   }
   @keyframes shiftGrid {
     from { background-position:0 0; }
     to   { background-position:1000px 1000px; }
   }
-  .box {
-    position:relative; z-index:1; text-align:center; padding:2rem;
-  }
-  .title { 
-    font-size:3.5rem; color:#FFD700; 
-    text-shadow:0 0 10px #B8860B; 
+  .box { position:relative; z-index:1; text-align:center; padding:2rem; }
+  .title {
+    font-size:3.5rem; color:#FFD700;
+    text-shadow:0 0 10px #B8860B;
     animation:fadeInDown 1.5s ease-out;
   }
   @keyframes fadeInDown {
@@ -104,19 +97,20 @@ BASE_STYLE = """
     margin-top:1rem; font-size:1.5rem; color:#ccc;
     animation:fadeIn 2s ease-in-out;
   }
-  @keyframes fadeIn {
-    from { opacity:0; } to { opacity:1; }
+  .info {
+    margin-top:1.25rem; font-size:1.5rem; color:#fff;
   }
+  @keyframes fadeIn { from{opacity:0;} to{opacity:1;} }
   .cta {
-    margin-top:2rem; padding:1rem 2rem;
-    font-size:1.25rem; font-weight:bold;
-    background:rgba(255,255,255,0.1); color:#fff;
+    margin-top:2rem; padding:1rem 2rem; font-size:1.25rem;
+    font-weight:bold; color:#fff; background:rgba(255,255,255,0.1);
     border:2px solid #fff; border-radius:8px;
     cursor:pointer; transition:.3s;
     animation:fadeInUp 1.5s ease-out;
   }
   .cta:hover {
-    transform:scale(1.05); box-shadow:0 0 20px rgba(255,255,255,0.5);
+    transform:scale(1.05);
+    box-shadow:0 0 20px rgba(255,255,255,0.5);
   }
   @keyframes fadeInUp {
     from { opacity:0; transform:translateY(50px); }
@@ -134,81 +128,51 @@ BASE_STYLE = """
 """
 
 #───────────────────────────────────────────────────────────────────────────────
-# HTML Templates
+# Templates
 #───────────────────────────────────────────────────────────────────────────────
 INDEX_HTML = """
-<!DOCTYPE html>
-<html lang="en"><head><meta charset="utf-8"><title>Gaming Mods</title>
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><title>Gaming Mods</title>
 """ + BASE_STYLE + """
 </head><body>
-  <section class="hero">
-    <div class="box">
-      <div class="title">Gaming Mods Membership</div>
-      <div class="subtitle">
-        One-click YouTube login & Discord role grant<br>
-        for exclusive mods and tools.
-      </div>
-      <button class="cta" onclick="location.href='{{ google_url }}'">
-        Login with Google
-      </button>
+  <section class="hero"><div class="box">
+    <div class="title">Gaming Mods Membership</div>
+    <div class="subtitle">
+      One-click YouTube login & Discord role grant<br>
+      for exclusive mods and tools.
     </div>
-  </section>
+    <button class="cta" onclick="location.href='{{ google_url }}'">
+      Login with Google
+    </button>
+  </div></section>
 </body></html>
 """
 
 SUCCESS_HTML = """
-<!DOCTYPE html>
-<html lang="en"><head><meta charset="utf-8"><title>Success</title>
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><title>Success</title>
 """ + BASE_STYLE + """
 </head><body>
-  <section class="hero">
-    <div class="box">
-      <div class="msg success">✅ Subscriber role granted!</div>
-      <div class="subtitle">You may now close this window.</div>
+  <section class="hero"><div class="box">
+    <div class="msg success">✅ Subscriber role granted!</div>
+    <div class="info">
+      Your Discord ID: <strong>{{ discord_id }}</strong>
     </div>
-  </section>
+    <div class="subtitle">
+      Copy this ID into your game within 15 minutes.
+    </div>
+  </div></section>
 </body></html>
 """
 
 ERROR_HTML = """
-<!DOCTYPE html>
-<html lang="en"><head><meta charset="utf-8"><title>Error</title>
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><title>Error</title>
 """ + BASE_STYLE + """
 </head><body>
-  <section class="hero">
-    <div class="box">
-      <div class="msg error">❌ {{ message }}</div>
-      <div class="subtitle">Please try again or contact support.</div>
+  <section class="hero"><div class="box">
+    <div class="msg error">❌ {{ message }}</div>
+    <div class="subtitle">
+      Please try again or contact support.
     </div>
-  </section>
-</body></html>
-"""
-
-CHECK_HTML = """
-<!DOCTYPE html>
-<html lang="en"><head><meta charset="utf-8"><title>Check Role</title>
-""" + BASE_STYLE + """
-</head><body>
-  <section class="hero">
-    <div class="box">
-      <div class="title">Check Your Subscriber Role</div>
-      <input id="discordId" type="text" placeholder="Enter Discord ID" />
-      <button class="cta" onclick="checkRole()">Check</button>
-      <div id="result"></div>
-    </div>
-  </section>
-  <script>
-    async function checkRole() {
-      const id = document.getElementById('discordId').value.trim();
-      if (!id) return;
-      const res = await fetch(`/status/${id}`);
-      const json = await res.json().catch(()=>({ok:false}));
-      document.getElementById('result').innerHTML = 
-        json.ok && json.role_granted
-          ? '<div class="msg success">You have the subscriber role!</div>'
-          : '<div class="msg error">Subscriber role not found.</div>';
-    }
-  </script>
+  </div></section>
 </body></html>
 """
 
@@ -230,7 +194,8 @@ def google_login():
         "created_at": now(),
         "yt_verified": False,
         "discord_id": None,
-        "role_granted": False
+        "role_granted": False,
+        "role_time": None
     }
     logging.info(f"New activation code: {code}")
     oauth_url = (
@@ -251,7 +216,6 @@ def google_callback():
         pending_activations.pop(code, None)
         return render_template_string(ERROR_HTML, message="Session expired."), 400
 
-    # Exchange code for access token
     token_data = requests.post(
         "https://oauth2.googleapis.com/token",
         data={
@@ -261,19 +225,17 @@ def google_callback():
             "redirect_uri": GOOGLE_REDIRECT,
             "grant_type": "authorization_code"
         },
-        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        headers={"Content-Type":"application/x-www-form-urlencoded"},
         timeout=10
     ).json()
     token = token_data.get("access_token")
     if not token:
         return render_template_string(ERROR_HTML, message="Google auth failed."), 400
 
-    # Check YouTube subscription
     headers = {"Authorization": f"Bearer {token}"}
     url     = "https://www.googleapis.com/youtube/v3/subscriptions"
-    params  = {"part": "snippet", "mine": "true", "maxResults": 50}
+    params  = {"part":"snippet","mine":"true","maxResults":50}
     subscribed = False
-
     while True:
         resp = requests.get(url, headers=headers, params=params, timeout=10).json()
         for item in resp.get("items", []):
@@ -294,7 +256,7 @@ def google_callback():
 def discord_login():
     code = request.args.get("code")
     entry = pending_activations.get(code)
-    if not entry or not entry["yt_verified"] or is_expired(entry["created_at"], ACTIVATION_TTL):
+    if not entry or not entry["yt_verified"] or is_expired(entry["created_at"], CODE_TTL):
         pending_activations.pop(code, None)
         return render_template_string(ERROR_HTML, message="Activation expired."), 400
 
@@ -324,15 +286,13 @@ def discord_callback():
             "code": request.args.get("code"),
             "redirect_uri": DISCORD_REDIRECT
         },
-        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        headers={"Content-Type":"application/x-www-form-urlencoded"},
         timeout=10
     ).json()
-
     access = token_data.get("access_token")
     if not access:
         return render_template_string(ERROR_HTML, message="Discord auth failed."), 400
 
-    # Fetch user ID
     user = requests.get(
         "https://discord.com/api/users/@me",
         headers={"Authorization": f"Bearer {access}"},
@@ -342,7 +302,6 @@ def discord_callback():
     if not discord_id:
         return render_template_string(ERROR_HTML, message="Failed to fetch user."), 400
 
-    # Add to server & grant role
     bot_headers = {
         "Authorization": f"Bot {DISCORD_BOT_TOKEN}",
         "Content-Type": "application/json"
@@ -363,37 +322,36 @@ def discord_callback():
     granted = role_resp.status_code in (201, 204)
     entry["discord_id"]   = discord_id
     entry["role_granted"] = granted
+    entry["role_time"]    = now()
 
     if granted:
-        logging.info(f"Role granted to Discord ID {discord_id}")
-        return render_template_string(SUCCESS_HTML)
+        logging.info(f"Role granted to {discord_id}")
+        return render_template_string(
+            SUCCESS_HTML,
+            discord_id=discord_id
+        )
     else:
-        detail = role_resp.json() if role_resp.headers.get("Content-Type","").startswith("application/json") else {"error": role_resp.text}
+        detail = (role_resp.json()
+                  if role_resp.headers.get("Content-Type","").startswith("application/json")
+                  else {"error": role_resp.text})
         return render_template_string(ERROR_HTML, message=f"Role failed: {detail}"), 400
 
 @app.route("/status/<discord_id>")
 def status(discord_id):
     """
-    JSON endpoint for in-game polling.
-    Returns {ok: true, role_granted: bool} if ID found,
-    or {ok: false} with 404 if not.
+    JSON endpoint for game polling.
+    Returns {ok: true, role_granted: bool} if found and within 15 min,
+    or {ok: false} / 404 otherwise.
     """
     for entry in pending_activations.values():
         if entry.get("discord_id") == discord_id:
-            return jsonify({
-                "ok": True,
-                "role_granted": entry["role_granted"]
-            }), 200
+            granted = entry.get("role_granted", False)
+            rt = entry.get("role_time", 0)
+            if granted and is_expired(rt, ACTIVATION_TTL):
+                granted = False
+            return jsonify({"ok": True, "role_granted": granted}), 200
     return jsonify({"ok": False}), 404
 
-@app.route("/check")
-def check():
-    """Manual browser check form."""
-    return render_template_string(CHECK_HTML)
-
-#───────────────────────────────────────────────────────────────────────────────
-# Entrypoint
-#───────────────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    logging.info("Starting Flask server…")
+    logging.info("Starting server…")
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
