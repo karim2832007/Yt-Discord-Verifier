@@ -34,16 +34,15 @@ DISCORD_ROLE_ID       = os.environ["DISCORD_ROLE_ID"]
 DISCORD_BOT_TOKEN     = os.environ["DISCORD_BOT_TOKEN"]
 
 #───────────────────────────────────────────────────────────────────────────────
-# One‐time activation storage
+# One-time activation storage
 #───────────────────────────────────────────────────────────────────────────────
-# Maps Ren’Py codes → { "activated_at": timestamp }
 pending_activations = {}
 
 #───────────────────────────────────────────────────────────────────────────────
 # Timeouts
 #───────────────────────────────────────────────────────────────────────────────
-CODE_TTL       = 15 * 60         # OAuth state (seconds)
-ACTIVATION_TTL = 24 * 60 * 60    # Role validity (seconds)
+CODE_TTL       = 15 * 60         # OAuth state TTL (seconds)
+ACTIVATION_TTL = 24 * 60 * 60    # Role validity TTL (seconds)
 
 #───────────────────────────────────────────────────────────────────────────────
 # Helpers
@@ -66,8 +65,7 @@ def require_session_fields(*keys) -> bool:
 def _success_page():
     return """
 <!DOCTYPE html>
-<html lang="en">
-<head><meta charset="utf-8"><title>Success</title>
+<html lang="en"><head><meta charset="utf-8"><title>Success</title>
 <link rel="icon" href="{{ url_for('static', filename='favicon.ico') }}">
 <style>
   body, html { width:100%; height:100%; margin:0; background:#000; color:#0f0;
@@ -76,21 +74,18 @@ def _success_page():
   .box { text-align:center; }
   .msg { font-size:2rem; text-shadow:0 0 10px #0f0; }
 </style>
-</head>
-<body>
+</head><body>
   <div class="box">
-    <p class="msg">✅ Success! Role has been assigned.</p>
-    <p>You can close this tab.</p>
+    <p class="msg">✅ Success! You have the subscriber role.</p>
+    <p>You can close this tab now.</p>
   </div>
-</body>
-</html>
+</body></html>
 """
 
 def _error_page():
     return """
 <!DOCTYPE html>
-<html lang="en">
-<head><meta charset="utf-8"><title>Error</title>
+<html lang="en"><head><meta charset="utf-8"><title>Error</title>
 <link rel="icon" href="{{ url_for('static', filename='favicon.ico') }}">
 <style>
   body, html { width:100%; height:100%; margin:0; background:#000; color:#f00;
@@ -99,14 +94,12 @@ def _error_page():
   .box { text-align:center; }
   .msg { font-size:2rem; text-shadow:0 0 10px #f00; }
 </style>
-</head>
-<body>
+</head><body>
   <div class="box">
     <p class="msg">❌ {{ message }}</p>
     <p>Please try again or contact support.</p>
   </div>
-</body>
-</html>
+</body></html>
 """
 
 #───────────────────────────────────────────────────────────────────────────────
@@ -117,64 +110,38 @@ def home():
     session.clear()
     return render_template_string("""
 <!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <title>Gaming Mods Membership</title>
-  <meta name="viewport" content="width=device-width,initial-scale=1">
-  <link rel="icon" href="{{ url_for('static', filename='favicon.ico') }}" type="image/x-icon">
-  <style>
-    * { margin:0; padding:0; box-sizing:border-box; }
-    body, html {
-      width:100%; height:100%; overflow:hidden;
-      background:#0a0a0a; font-family:'Segoe UI',sans-serif; color:#eee;
-    }
-    .hero {
-      position:relative; width:100%; height:100vh;
-      display:flex; flex-direction:column; align-items:center; justify-content:center;
-      background: radial-gradient(circle at center, #111 0%, #000 80%);
-    }
-    .hero::before {
-      content:""; position:absolute; top:0; left:0; width:100%; height:100%;
-      background:url('{{ url_for("static", filename="holo-grid.png") }}') center/cover;
-      opacity:.1; animation:holoShift 20s linear infinite;
-    }
-    @keyframes holoShift { from{background-position:0 0;} to{background-position:1000px 1000px;} }
-
-    .hero-title {
-      z-index:1; font-size:4rem; font-weight:bold; font-style:italic;
-      color:#FFD700;
-      text-shadow:
-        0 0 10px #B8860B,
-        0 0 20px #B8860B,
-        0 0 30px #FFD700;
-      animation:fadeInDown 1.5s ease-out;
-    }
-    @keyframes fadeInDown {
-      from{opacity:0; transform:translateY(-50px);} to{opacity:1; transform:translateY(0);}
-    }
-
-    .hero-subtitle {
-      z-index:1; margin-top:1rem; font-size:1.25rem; max-width:700px; text-align:center;
-      color:#ccc; animation:fadeIn 2s ease-in-out;
-    }
-    @keyframes fadeIn { from{opacity:0;} to{opacity:1;} }
-
-    .cta-btn {
-      z-index:1; margin-top:2rem; padding:1rem 2rem; font-size:1.2rem; font-weight:bold;
-      background: rgba(255,255,255,0.1); color:#fff; border:2px solid #fff; border-radius:8px;
-      cursor:pointer; transition: transform .3s ease, box-shadow .3s ease;
-      animation:fadeInUp 1.5s ease-out;
-    }
-    .cta-btn:hover {
-      transform:scale(1.05); box-shadow:0 0 15px rgba(255,255,255,0.5);
-    }
-    @keyframes fadeInUp {
-      from{opacity:0; transform:translateY(50px);} to{opacity:1; transform:translateY(0);}
-    }
-  </style>
-</head>
-<body>
+<html lang="en"><head><meta charset="utf-8"><title>Gaming Mods Membership</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="icon" href="{{ url_for('static', filename='favicon.ico') }}" type="image/x-icon">
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body, html { width:100%; height:100%; overflow:hidden;
+    background:#0a0a0a; font-family:'Segoe UI',sans-serif; color:#eee; }
+  .hero { position:relative; width:100%; height:100vh;
+    display:flex; flex-direction:column; align-items:center; justify-content:center;
+    background: radial-gradient(circle at center, #111 0%, #000 80%); }
+  .hero::before { content:""; position:absolute; top:0; left:0; width:100%; height:100%;
+    background: url('{{ url_for("static", filename="holo-grid.png") }}') center/cover;
+    opacity:.1; animation:holoShift 20s linear infinite; }
+  @keyframes holoShift { from{background-position:0 0;} to{background-position:1000px 1000px;} }
+  .hero-title { z-index:1; font-size:4rem; font-weight:bold; font-style:italic;
+    color:#FFD700; text-shadow:
+      0 0 10px #B8860B,
+      0 0 20px #B8860B,
+      0 0 30px #FFD700;
+    animation:fadeInDown 1.5s ease-out; }
+  @keyframes fadeInDown { from{opacity:0; transform:translateY(-50px);} to{opacity:1; transform:translateY(0);} }
+  .hero-subtitle { z-index:1; margin-top:1rem; font-size:1.25rem; max-width:700px; text-align:center;
+    color:#ccc; animation:fadeIn 2s ease-in-out; }
+  @keyframes fadeIn { from{opacity:0;} to{opacity:1;} }
+  .cta-btn { z-index:1; margin-top:2rem; padding:1rem 2rem; font-size:1.2rem; font-weight:bold;
+    background: rgba(255,255,255,0.1); color:#fff; border:2px solid #fff; border-radius:8px;
+    cursor:pointer; transition: transform .3s ease, box-shadow .3s ease;
+    animation:fadeInUp 1.5s ease-out; }
+  .cta-btn:hover { transform:scale(1.05); box-shadow:0 0 15px rgba(255,255,255,0.5); }
+  @keyframes fadeInUp { from{opacity:0; transform:translateY(50px);} to{opacity:1; transform:translateY(0);} }
+</style>
+</head><body>
   <section class="hero">
     <h1 class="hero-title">Gaming Mods</h1>
     <p class="hero-subtitle">
@@ -185,8 +152,7 @@ def home():
       Login with Google
     </button>
   </section>
-</body>
-</html>
+</body></html>
 """, google_url=f"{BASE_URL}/google/login")
 
 #───────────────────────────────────────────────────────────────────────────────
@@ -212,7 +178,7 @@ def google_login():
 
 @app.route("/google/callback")
 def google_callback():
-    if not require_session_fields("code","created","status") or is_expired(session["created"]):
+    if not require_session_fields("code", "created", "status") or is_expired(session["created"]):
         return "Session expired", 400
     if request.args.get("state") != session["code"]:
         return "Invalid state", 400
@@ -238,7 +204,7 @@ def google_callback():
 
     headers = {"Authorization": f"Bearer {token['access_token']}"}
     url     = "https://www.googleapis.com/youtube/v3/subscriptions"
-    params  = {"part":"snippet","mine":"true","maxResults":50}
+    params  = {"part":"snippet", "mine":"true", "maxResults":50}
 
     subscribed = False
     while True:
@@ -264,7 +230,7 @@ def google_callback():
 @app.route("/discord/login")
 def discord_login():
     if session.get("status") != "yt_ok":
-        return "You must verify YouTube first.", 400
+        return render_template_string(_error_page(), message="You must verify YouTube first."), 400
 
     state = session["code"]
     discord_auth_url = (
@@ -282,7 +248,7 @@ def discord_login():
 #───────────────────────────────────────────────────────────────────────────────
 @app.route("/discord/callback")
 def discord_callback():
-    if not require_session_fields("code","created","status") or is_expired(session["created"]):
+    if not require_session_fields("code", "created", "status") or is_expired(session["created"]):
         return render_template_string(_error_page(), message="Session expired.")
     if request.args.get("state") != session["code"]:
         return render_template_string(_error_page(), message="Invalid state.")
@@ -318,10 +284,16 @@ def discord_callback():
         "Authorization": f"Bot {DISCORD_BOT_TOKEN}",
         "Content-Type": "application/json"
     }
-    join_url = f"https://discord.com/api/guilds/{DISCORD_GUILD_ID}/members/{user['id']}"
+    join_url = (
+        f"https://discord.com/api/guilds/{DISCORD_GUILD_ID}"
+        f"/members/{user['id']}"
+    )
     requests.put(join_url, headers=bot_headers,
                  json={"access_token": token_req["access_token"]}, timeout=20)
-    role_url = f"https://discord.com/api/guilds/{DISCORD_GUILD_ID}/members/{user['id']}/roles/{DISCORD_ROLE_ID}"
+    role_url = (
+        f"https://discord.com/api/guilds/{DISCORD_GUILD_ID}"
+        f"/members/{user['id']}/roles/{DISCORD_ROLE_ID}"
+    )
     resp = requests.put(role_url, headers=bot_headers, timeout=20)
 
     if resp.status_code in (204, 201):
@@ -329,15 +301,8 @@ def discord_callback():
         session["activated_at"] = now()
         return render_template_string(_success_page())
     else:
-        detail = {}
-        if resp.headers.get("Content-Type", "").startswith("application/json"):
-            detail = resp.json()
-        else:
-            detail = {"error": resp.text}
-        return render_template_string(
-            _error_page(),
-            message=f"Role assignment failed: {detail}"
-        )
+        detail = resp.json() if resp.headers.get("Content-Type", "").startswith("application/json") else {"error": resp.text}
+        return render_template_string(_error_page(), message=f"Role assignment failed: {detail}")
 
 #───────────────────────────────────────────────────────────────────────────────
 # 5) Ren’Py Polling & Misc Endpoints
@@ -368,8 +333,8 @@ def status_code(code):
 
 def remove_role_daily():
     bot_headers = {
-        "Authorization": f"Bot {DISCORD_BOT_TOKEN}", 
-        "Content-Type":"application/json"
+        "Authorization": f"Bot {DISCORD_BOT_TOKEN}",
+        "Content-Type": "application/json"
     }
     r = requests.get(
         f"https://discord.com/api/guilds/{DISCORD_GUILD_ID}/members?limit=1000",
