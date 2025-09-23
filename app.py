@@ -31,13 +31,16 @@ DISCORD_ROLE_ID       = os.environ["DISCORD_ROLE_ID"]
 DISCORD_BOT_TOKEN     = os.environ["DISCORD_BOT_TOKEN"]
 
 #───────────────────────────────────────────────────────────────────────────────
-# In-memory stores
+# One‐time activation storage
 #───────────────────────────────────────────────────────────────────────────────
-# Pending YouTube verifications (code → timestamp)
+# Maps code → { created_at, yt_time, role_time, discord_id }
 pending_activations = {}
 
-# Final user statuses (discord_id → did_grant_role)
-user_status = {}
+#───────────────────────────────────────────────────────────────────────────────
+# Timeouts
+#───────────────────────────────────────────────────────────────────────────────
+CODE_TTL       = 15 * 60         # 15 minutes to complete YT check
+ACTIVATION_TTL = 24 * 60 * 60    # 24 hours role validity
 
 #───────────────────────────────────────────────────────────────────────────────
 # Helpers
@@ -48,8 +51,11 @@ def now() -> int:
 def gen_code(n: int = 6) -> str:
     return "".join(secrets.choice(string.digits) for _ in range(n))
 
+def is_expired(ts: int, ttl: int) -> bool:
+    return (now() - ts) > ttl
+
 #───────────────────────────────────────────────────────────────────────────────
-# Shared HTML theme
+# Shared holographic theme styles
 #───────────────────────────────────────────────────────────────────────────────
 BASE_STYLE = """
 <link rel="icon" href="/static/favicon.ico">
@@ -84,66 +90,81 @@ BASE_STYLE = """
 """
 
 #───────────────────────────────────────────────────────────────────────────────
-# Page templates
+# HTML Templates
 #───────────────────────────────────────────────────────────────────────────────
 INDEX_HTML = """
 <!DOCTYPE html>
-<html lang="en"><head><meta charset="utf-8"><title>Gaming Mods</title>
+<html lang="en"><head><meta charset="utf-8"><title>Gaming Mods Membership</title>
 """ + BASE_STYLE + """
 </head><body>
   <section class="hero">
     <div class="box">
-      <div class="title">Gaming Mods Membership</div>
+      <div class="title">Gaming Mods</div>
       <div class="subtitle">
-        Get your YouTube Subscriber role on Discord<br>
-        with one seamless login.
+        Unlock cheat engines, gallery tools & exclusive features<br>
+        with YouTube + Discord integration.
       </div>
-      <button class="cta" onclick="location.href='{{ login_url }}'">
-        Login & Get Role
+      <button class="cta" onclick="location.href='{{ google_url }}'">
+        Login with Google
       </button>
     </div>
   </section>
 </body></html>
 """
 
-RESULT_HTML = """
+SUCCESS_HTML = """
 <!DOCTYPE html>
-<html lang="en"><head><meta charset="utf-8"><title>Result</title>
+<html lang="en"><head><meta charset="utf-8"><title>Success</title>
 """ + BASE_STYLE + """
 </head><body>
   <section class="hero">
     <div class="box">
-      {% if role_granted %}
-        <div class="msg success">✅ Subscriber role granted!</div>
-      {% else %}
-        <div class="msg error">❌ Could not grant subscriber role.</div>
-      {% endif %}
+      <div class="msg success">✅ Subscriber role granted!</div>
       <div class="info">Your Discord ID: <strong>{{ user_id }}</strong></div>
-      {% if role_granted %}
-        <div class="info">Copy this ID into your game.</div>
-      {% endif %}
+      <div class="info">Copy this into your game within 1 hour.</div>
+      <div class="info">Check status anytime:</div>
+      <a class="link" href="{{ base_url }}/status_by_id/{{ user_id }}">
+        {{ base_url }}/status_by_id/{{ user_id }}
+      </a>
+    </div>
+  </section>
+</body></html>
+"""
+
+ERROR_HTML = """
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><title>Error</title>
+""" + BASE_STYLE + """
+</head><body>
+  <section class="hero">
+    <div class="box">
+      <div class="msg error">❌ {{ message }}</div>
+      <div class="info">Please try again or contact support.</div>
     </div>
   </section>
 </body></html>
 """
 
 #───────────────────────────────────────────────────────────────────────────────
-# 1) Home & “main link”
+# Routes
 #───────────────────────────────────────────────────────────────────────────────
+
 @app.route("/")
 def home():
     return render_template_string(
         INDEX_HTML,
-        login_url=f"{BASE_URL}/login"
+        google_url=f"{BASE_URL}/google/login"
     )
 
-#───────────────────────────────────────────────────────────────────────────────
-# 2) Begin Google OAuth → YouTube check
-#───────────────────────────────────────────────────────────────────────────────
-@app.route("/login")
-def login():
+@app.route("/google/login")
+def google_login():
     code = gen_code()
-    pending_activations[code] = now()
+    pending_activations[code] = {
+        "created_at": now(),
+        "yt_time": None,
+        "role_time": None,
+        "discord_id": None
+    }
     auth_url = (
         "https://accounts.google.com/o/oauth2/v2/auth"
         f"?client_id={GOOGLE_CLIENT_ID}"
@@ -157,23 +178,28 @@ def login():
 @app.route("/google/callback")
 def google_callback():
     code = request.args.get("state")
-    if code not in pending_activations:
-        return render_template_string(RESULT_HTML, role_granted=False, user_id="—")
-    # Exchange code for token
-    token_data = requests.post(
+    entry = pending_activations.get(code)
+    if not entry:
+        return render_template_string(ERROR_HTML, message="Invalid session.")
+    if is_expired(entry["created_at"], CODE_TTL):
+        del pending_activations[code]
+        return render_template_string(ERROR_HTML, message="Session expired.")
+
+    token_resp = requests.post(
         "https://oauth2.googleapis.com/token",
         data={
-            "client_id": Google_CLIENT_ID,
+            "client_id": GOOGLE_CLIENT_ID,
             "client_secret": GOOGLE_CLIENT_SECRET,
             "code": request.args.get("code"),
             "redirect_uri": GOOGLE_REDIRECT,
             "grant_type": "authorization_code"
         },
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
         timeout=20
     ).json()
-    access_token = token_data.get("access_token")
+    access_token = token_resp.get("access_token")
     if not access_token:
-        return render_template_string(RESULT_HTML, role_granted=False, user_id="—")
+        return render_template_string(ERROR_HTML, message="Google auth failed.")
 
     # Check YouTube subscription
     headers = {"Authorization": f"Bearer {access_token}"}
@@ -184,9 +210,7 @@ def google_callback():
     while True:
         resp = requests.get(url, headers=headers, params=params, timeout=20).json()
         for item in resp.get("items", []):
-            if item.get("snippet", {})\
-                   .get("resourceId", {})\
-                   .get("channelId") == YOUTUBE_CHANNEL_ID:
+            if item.get("snippet", {}).get("resourceId", {}).get("channelId") == YOUTUBE_CHANNEL_ID:
                 subscribed = True
                 break
         if subscribed or "nextPageToken" not in resp:
@@ -194,19 +218,21 @@ def google_callback():
         params["pageToken"] = resp["nextPageToken"]
 
     if not subscribed:
-        return render_template_string(RESULT_HTML, role_granted=False, user_id="—")
+        return render_template_string(ERROR_HTML, message="YouTube subscription not found.")
 
-    # Pass through to Discord OAuth
+    entry["yt_time"] = now()
     return redirect(f"{BASE_URL}/discord/login?code={code}")
 
-#───────────────────────────────────────────────────────────────────────────────
-# 3) Discord OAuth → Role assignment
-#───────────────────────────────────────────────────────────────────────────────
 @app.route("/discord/login")
 def discord_login():
     code = request.args.get("code")
-    if code not in pending_activations:
-        return render_template_string(RESULT_HTML, role_granted=False, user_id="—")
+    entry = pending_activations.get(code)
+    if not entry or not entry["yt_time"]:
+        return render_template_string(ERROR_HTML, message="You must verify YouTube first.")
+    if is_expired(entry["yt_time"], ACTIVATION_TTL):
+        del pending_activations[code]
+        return render_template_string(ERROR_HTML, message="Activation expired.")
+
     auth_url = (
         "https://discord.com/api/oauth2/authorize"
         f"?client_id={DISCORD_CLIENT_ID}"
@@ -220,10 +246,10 @@ def discord_login():
 @app.route("/discord/callback")
 def discord_callback():
     code = request.args.get("state")
-    if code not in pending_activations:
-        return render_template_string(RESULT_HTML, role_granted=False, user_id="—")
+    entry = pending_activations.get(code)
+    if not entry or not entry["yt_time"]:
+        return render_template_string(ERROR_HTML, message="Session expired.")
 
-    # Exchange Discord code for token
     token_req = requests.post(
         "https://discord.com/api/oauth2/token",
         data={
@@ -233,21 +259,22 @@ def discord_callback():
             "code": request.args.get("code"),
             "redirect_uri": DISCORD_REDIRECT
         },
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
         timeout=20
     ).json()
     access_token = token_req.get("access_token")
     if not access_token:
-        return render_template_string(RESULT_HTML, role_granted=False, user_id="—")
+        return render_template_string(ERROR_HTML, message="Discord auth failed.")
 
-    # Fetch Discord ID
     user = requests.get(
         "https://discord.com/api/users/@me",
         headers={"Authorization": f"Bearer {access_token}"},
         timeout=20
     ).json()
-    discord_id = user.get("id", "—")
+    discord_id = user.get("id")
+    if not discord_id:
+        return render_template_string(ERROR_HTML, message="Failed to fetch Discord user.")
 
-    # Assign the role in the guild
     bot_headers = {
         "Authorization": f"Bot {DISCORD_BOT_TOKEN}",
         "Content-Type": "application/json"
@@ -259,38 +286,58 @@ def discord_callback():
         json={"access_token": access_token},
         timeout=20
     )
-    # Give them the subscriber role
-    role_resp = requests.put(
+    # Assign role
+    resp = requests.put(
         f"https://discord.com/api/guilds/{DISCORD_GUILD_ID}/members/{discord_id}"
         f"/roles/{DISCORD_ROLE_ID}",
         headers=bot_headers,
         timeout=20
     )
 
-    # Record final status and render result page
-    granted = role_resp.status_code in (201, 204)
-    user_status[discord_id] = granted
-    return render_template_string(
-        RESULT_HTML,
-        role_granted=granted,
-        user_id=discord_id
-    )
+    if resp.status_code in (201, 204):
+        entry["role_time"]  = now()
+        entry["discord_id"] = discord_id
+        return render_template_string(
+            SUCCESS_HTML,
+            user_id=discord_id,
+            base_url=BASE_URL
+        )
+    else:
+        detail = resp.json() if resp.headers.get("Content-Type","").startswith("application/json") else {"error": resp.text}
+        return render_template_string(ERROR_HTML, message=f"Role assignment failed: {detail}")
 
-#───────────────────────────────────────────────────────────────────────────────
-# 4) Status check by Discord ID (JSON for game polling)
-#───────────────────────────────────────────────────────────────────────────────
-@app.route("/status/<discord_id>")
-def status(discord_id):
-    if discord_id not in user_status:
+@app.route("/has_role_recent")
+def has_role_recent():
+    code = request.args.get("code")
+    entry = pending_activations.get(code, {})
+    valid = bool(entry.get("role_time")) and not is_expired(entry["role_time"], ACTIVATION_TTL)
+    return jsonify({"ok": True, "has_role": valid})
+
+@app.route("/status/<code>")
+def status_code(code):
+    entry = pending_activations.get(code)
+    if not entry:
         return jsonify({"ok": False}), 404
     return jsonify({
         "ok": True,
-        "role_granted": user_status[discord_id]
+        "yt_verified":   bool(entry.get("yt_time")),
+        "role_granted":  bool(entry.get("role_time")),
+        "expired":       is_expired(entry.get("created_at", 0), CODE_TTL)
     }), 200
 
-#───────────────────────────────────────────────────────────────────────────────
-# 5) Optional Role Cleanup Endpoint
-#───────────────────────────────────────────────────────────────────────────────
+@app.route("/status_by_id/<discord_id>")
+def status_by_id(discord_id):
+    for entry in pending_activations.values():
+        if entry.get("discord_id") == discord_id:
+            granted = bool(entry.get("role_time")) and not is_expired(entry["role_time"], ACTIVATION_TTL)
+            return render_template_string(
+                SUCCESS_HTML if granted else ERROR_HTML,
+                user_id=discord_id,
+                base_url=BASE_URL,
+                message="Role expired." if granted and is_expired(entry["role_time"], ACTIVATION_TTL) else "You do not have the subscriber role."
+            )
+    return render_template_string(ERROR_HTML, message="Discord ID not found."), 404
+
 @app.route("/remove_roles_now")
 def remove_roles_now():
     bot_headers = {
@@ -301,7 +348,11 @@ def remove_roles_now():
         f"https://discord.com/api/guilds/{DISCORD_GUILD_ID}/members?limit=1000",
         headers=bot_headers, timeout=20
     )
-    members = r.json() if r.status_code == 200 else []
+    try:
+        members = r.json()
+    except:
+        return jsonify({"ok": False, "error": "Parse error"}), 500
+
     removed = 0
     for m in members:
         if DISCORD_ROLE_ID in m.get("roles", []):
@@ -312,7 +363,19 @@ def remove_roles_now():
             )
             if rr.status_code == 204:
                 removed += 1
+
     return jsonify({"ok": True, "removed": removed})
+
+@app.route("/has_role/<discord_id>")
+def has_role(discord_id):
+    r = requests.get(
+        f"https://discord.com/api/guilds/{DISCORD_GUILD_ID}/members/{discord_id}",
+        headers={"Authorization": f"Bot {DISCORD_BOT_TOKEN}"}, timeout=20
+    )
+    if r.status_code != 200:
+        return jsonify({"ok": False, "error": "User not found"}), 404
+    data = r.json()
+    return jsonify({"ok": True, "has_role": DISCORD_ROLE_ID in data.get("roles", [])}), 200
 
 #───────────────────────────────────────────────────────────────────────────────
 # Run the app
