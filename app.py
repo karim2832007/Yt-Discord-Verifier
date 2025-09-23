@@ -119,11 +119,17 @@ SUCCESS_HTML = """
     font-family:'Segoe UI',sans-serif;}
   .box{text-align:center;}
   .msg{font-size:2rem;text-shadow:0 0 10px #0f0;}
+  .info{margin-top:1rem;font-size:1rem;color:#0f0;}
+  .link{color:#0f0;text-decoration:underline;}
 </style>
 </head><body>
   <div class="box">
     <p class="msg">✅ Success! You have the subscriber role.</p>
-    <p>You can close this tab now.</p>
+    <p class="info">Your Discord ID is: <strong>{{ user_id }}</strong></p>
+    <p class="info">Copy this ID into the game within the next hour.</p>
+    <p class="info">To check your subscription status later, visit:</p>
+    <p><a class="link" href="{{ bot_link }}/status/{{ user_id }}">{{ bot_link }}/status/{{ user_id }}</a></p>
+    <p class="info">(Link valid for 1 hour from now.)</p>
   </div>
 </body></html>
 """
@@ -163,13 +169,11 @@ def home():
 @app.route("/google/login")
 def google_login():
     code = gen_code()
-    # record new activation code
     pending_activations[code] = {
         "created_at": now(),
         "yt_time": None,
         "role_time": None
     }
-
     auth_url = (
         "https://accounts.google.com/o/oauth2/v2/auth"
         f"?client_id={GOOGLE_CLIENT_ID}"
@@ -183,10 +187,9 @@ def google_login():
 @app.route("/google/callback")
 def google_callback():
     code = request.args.get("state")
-    if not code or code not in pending_activations:
+    entry = pending_activations.get(code)
+    if not entry:
         return render_template_string(ERROR_HTML, message="Invalid session."), 400
-
-    entry = pending_activations[code]
     if is_expired(entry["created_at"], CODE_TTL):
         del pending_activations[code]
         return render_template_string(ERROR_HTML, message="Session expired."), 400
@@ -207,12 +210,11 @@ def google_callback():
     if not access_token:
         return render_template_string(ERROR_HTML, message="Google auth failed."), 400
 
-    # check subscription
     headers = {"Authorization": f"Bearer {access_token}"}
     url     = "https://www.googleapis.com/youtube/v3/subscriptions"
     params  = {"part":"snippet","mine":"true","maxResults":50}
-
     subscribed = False
+
     while True:
         resp = requests.get(url, headers=headers, params=params, timeout=20).json()
         for item in resp.get("items", []):
@@ -226,7 +228,6 @@ def google_callback():
     if not subscribed:
         return render_template_string(ERROR_HTML, message="YouTube subscription not found."), 400
 
-    # mark YouTube verified
     entry["yt_time"] = now()
     return redirect(f"{BASE_URL}/discord/login?code={code}")
 
@@ -263,7 +264,6 @@ def discord_callback():
     if not entry or not entry["yt_time"]:
         return render_template_string(ERROR_HTML, message="Session expired."), 400
 
-    # swap code for token
     token_req = requests.post(
         "https://discord.com/api/oauth2/token",
         data={
@@ -280,7 +280,6 @@ def discord_callback():
     if not access_token:
         return render_template_string(ERROR_HTML, message="Discord auth failed."), 400
 
-    # fetch user ID
     user = requests.get(
         "https://discord.com/api/users/@me",
         headers={"Authorization": f"Bearer {access_token}"},
@@ -290,26 +289,31 @@ def discord_callback():
     if not discord_id:
         return render_template_string(ERROR_HTML, message="Failed to fetch Discord user."), 400
 
-    # assign role
     bot_headers = {
         "Authorization": f"Bot {DISCORD_BOT_TOKEN}",
         "Content-Type": "application/json"
     }
-    join_url = f"https://discord.com/api/guilds/{DISCORD_GUILD_ID}/members/{discord_id}"
-    requests.put(join_url, headers=bot_headers,
-                 json={"access_token": access_token}, timeout=20)
-    role_url = f"https://discord.com/api/guilds/{DISCORD_GUILD_ID}/members/{discord_id}/roles/{DISCORD_ROLE_ID}"
-    resp = requests.put(role_url, headers=bot_headers, timeout=20)
+    requests.put(
+        f"https://discord.com/api/guilds/{DISCORD_GUILD_ID}/members/{discord_id}",
+        headers=bot_headers,
+        json={"access_token": access_token},
+        timeout=20
+    )
+    resp = requests.put(
+        f"https://discord.com/api/guilds/{DISCORD_GUILD_ID}/members/{discord_id}/roles/{DISCORD_ROLE_ID}",
+        headers=bot_headers,
+        timeout=20
+    )
 
     if resp.status_code in (204, 201):
         entry["role_time"] = now()
-        return render_template_string(SUCCESS_HTML)
+        return render_template_string(
+            SUCCESS_HTML,
+            user_id=discord_id,
+            bot_link=BASE_URL
+        )
     else:
-        detail = {}
-        if resp.headers.get("Content-Type", "").startswith("application/json"):
-            detail = resp.json()
-        else:
-            detail = {"error": resp.text}
+        detail = resp.json() if resp.headers.get("Content-Type", "").startswith("application/json") else {"error": resp.text}
         return render_template_string(ERROR_HTML, message=f"Role assignment failed: {detail}")
 
 #───────────────────────────────────────────────────────────────────────────────
@@ -383,3 +387,4 @@ def has_role(discord_id):
 #───────────────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
+```[43dcd9a7-70db-4a1f-b0ae-981daa162054](https://github.com/werobot-france/eurobot2020-main/tree/f0dbb17e830c7d70283bebdbdc246b375ef9c863/python%2Fsrc%2FGame.py?citationMarker=43dcd9a7-70db-4a1f-b0ae-981daa162054 "1")[43dcd9a7-70db-4a1f-b0ae-981daa162054](https://github.com/Odaimoko/TTDS2019-20/tree/f846c1e60bc4ab06f541f674619d4c72a617ea80/util.py?citationMarker=43dcd9a7-70db-4a1f-b0ae-981daa162054 "2")[43dcd9a7-70db-4a1f-b0ae-981daa162054](https://github.com/ngtaloc/TotNghiep-Project/tree/8b72be93496d37f227ac7d87d5aae25d5241d519/WebEng%2FWebEng%2FContent%2FTemplate%2Fplugins%2Fraphael%2Fraphael.js?citationMarker=43dcd9a7-70db-4a1f-b0ae-981daa162054 "3")[43dcd9a7-70db-4a1f-b0ae-981daa162054](https://github.com/wjakethompson/rcppstan/tree/3b302cfdf265a6e5b5ddbe9357d24547f98a7ab8/README.md?citationMarker=43dcd9a7-70db-4a1f-b0ae-981daa162054 "4")[43dcd9a7-70db-4a1f-b0ae-981daa162054](https://github.com/Nuung/amnotifyKR/tree/064dc272ffa756228ebf53a7ef6dae3b2e25edea/amnotifyCrawler%2Fnike%2Fnike_restock.py?citationMarker=43dcd9a7-70db-4a1f-b0ae-981daa162054 "5")[43dcd9a7-70db-4a1f-b0ae-981daa162054](https://github.com/fkorning/vagrant-ubuntu-eoan-swapmyvote/tree/de483788af1538d349148facf3ff4ad102f43105/README.md?citationMarker=43dcd9a7-70db-4a1f-b0ae-981daa162054 "6")[43dcd9a7-70db-4a1f-b0ae-981daa162054](https://github.com/aurelien-castel/DUT-Oct-2019-API-IA/tree/50bdb4267f4678a77435b151d3bae2e1a1aa1903/projet%2Fagents%2Foptimisation_MinMax%2Ftree%2Fminimax_tree.py?citationMarker=43dcd9a7-70db-4a1f-b0ae-981daa162054 "7")[43dcd9a7-70db-4a1f-b0ae-981daa162054](https://github.com/sh-navid/NSBlueBook/tree/c70bc4ffc62587ecbc7ff784e11078d61cf832c6/app.py?citationMarker=43dcd9a7-70db-4a1f-b0ae-981daa162054 "8")[43dcd9a7-70db-4a1f-b0ae-981daa162054](https://github.com/sakurai-ryo/shell_oneliner_practice/tree/c9c5a41fc7e343709a235e3ecdd3680dc5592686/practice%2Ffile%2Fq8.sh?citationMarker=43dcd9a7-70db-4a1f-b0ae-981daa162054 "9")[43dcd9a7-70db-4a1f-b0ae-981daa162054](https://github.com/danuo/rocket-meister/tree/cf6c9866acc9341dd957ed7fedbbad5faf86409e/level_creator.py?citationMarker=43dcd9a7-70db-4a1f-b0ae-981daa162054 "10")[43dcd9a7-70db-4a1f-b0ae-981daa162054](https://github.com/Odaimoko/MACH-Pytorch/tree/32caddcc29541a1eb96dc3781d973b89bacfc2bb/src%2Fmach_utils.py?citationMarker=43dcd9a7-70db-4a1f-b0ae-981daa162054 "11")[43dcd9a7-70db-4a1f-b0ae-981daa162054](https://github.com/ZaymonFC/Learning-Flask-Microblog/tree/359738747d15f3ef853fa606ea3f6347def7e9d8/app%2Froutes.py?citationMarker=43dcd9a7-70db-4a1f-b0ae-981daa162054 "12")[43dcd9a7-70db-4a1f-b0ae-981daa162054](https://github.com/hpi-sam/QuantumProgramming/tree/453e0f3417bf2d0bd6db3260f56e033f7532d127/qpca%2Fsrc%2Ftests%2Ftest_data_sets.py?citationMarker=43dcd9a7-70db-4a1f-b0ae-981daa162054 "13")[43dcd9a7-70db-4a1f-b0ae-981daa162054](https://github.com/katmai1/buidl-project/tree/2d14683213f776078008adac15d447295f4b5c78/ipfsmods%2Fipfs_daemon.py?citationMarker=43dcd9a7-70db-4a1f-b0ae-981daa162054 "14")[43dcd9a7-70db-4a1f-b0ae-981daa162054](https://github.com/MLH-Fellowship/fellow-central/tree/ccb6127aae4828f3cf7b6b637babe986b9ae839b/backend%2Fapp.py?citationMarker=43dcd9a7-70db-4a1f-b0ae-981daa162054 "15")[43dcd9a7-70db-4a1f-b0ae-981daa162054](https://github.com/pouyakary/pirate/tree/32b79edc0515d3221e7417c3bf27e60bed810161/tools%2Fbuild-pirate.sh?citationMarker=43dcd9a7-70db-4a1f-b0ae-981daa162054 "16")[43dcd9a7-70db-4a1f-b0ae-981daa162054](https://github.com/quocs-studio/site/tree/94550f7d4d08264980aad82818dbd93ee278fc35/src%2Futils%2Fcms.js?citationMarker=43dcd9a7-70db-4a1f-b0ae-981daa162054 "17")[43dcd9a7-70db-4a1f-b0ae-981daa162054](https://github.com/katmai1/qportfolio/tree/987f40a07fd833f9948ac8470e85e96f43070a95/run.py?citationMarker=43dcd9a7-70db-4a1f-b0ae-981daa162054 "18")
