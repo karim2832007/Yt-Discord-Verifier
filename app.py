@@ -339,18 +339,54 @@ def discord_callback():
 @app.route("/status/<discord_id>")
 def status(discord_id):
     """
-    JSON endpoint for game polling.
-    Returns {ok: true, role_granted: bool} if found and within 15 min,
-    or {ok: false} / 404 otherwise.
+    Live-checks Discord for the given ID.
+    Returns JSON:
+      - ok: true/false
+      - role_granted: true/false (only if ok=true)
+      - message: hint for the client (Ren'Py)
     """
-    for entry in pending_activations.values():
-        if entry.get("discord_id") == discord_id:
-            granted = entry.get("role_granted", False)
-            rt = entry.get("role_time", 0)
-            if granted and is_expired(rt, ACTIVATION_TTL):
-                granted = False
-            return jsonify({"ok": True, "role_granted": granted}), 200
-    return jsonify({"ok": False}), 404
+    bot_headers = {
+        "Authorization": f"Bot {DISCORD_BOT_TOKEN}",
+        "Content-Type": "application/json"
+    }
+
+    # Fetch member from Discord
+    resp = requests.get(
+        f"https://discord.com/api/guilds/{DISCORD_GUILD_ID}/members/{discord_id}",
+        headers=bot_headers,
+        timeout=10
+    )
+
+    # Not in guild
+    if resp.status_code == 404:
+        return jsonify({
+            "ok": False,
+            "message": "You’re not in the Discord server. Join and verify first."
+        }), 404
+
+    # Other API error
+    if resp.status_code != 200:
+        return jsonify({
+            "ok": False,
+            "message": f"Discord API error {resp.status_code}. Try again later."
+        }), resp.status_code
+
+    # Check roles
+    data = resp.json()
+    roles = data.get("roles", [])
+
+    if str(DISCORD_ROLE_ID) in [str(r) for r in roles]:
+        return jsonify({
+            "ok": True,
+            "role_granted": True,
+            "message": "Subscriber role verified."
+        }), 200
+    else:
+        return jsonify({
+            "ok": True,
+            "role_granted": False,
+            "message": "Subscriber role not found. Subscribe on YouTube and complete Discord verification."
+        }), 200
 
 @app.route("/remove_roles_now")
 def remove_roles_now():
