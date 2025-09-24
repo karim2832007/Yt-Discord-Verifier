@@ -356,34 +356,54 @@ def status(discord_id):
 def remove_roles_now():
     """
     Removes the subscriber role from all members in the guild who currently have it.
-    Useful for manual cleanup or testing.
+    Supports pagination and returns a styled HTML confirmation.
     """
     bot_headers = {
         "Authorization": f"Bot {DISCORD_BOT_TOKEN}",
         "Content-Type": "application/json"
     }
-    r = requests.get(
-        f"https://discord.com/api/guilds/{DISCORD_GUILD_ID}/members?limit=1000",
-        headers=bot_headers,
-        timeout=20
-    )
-    try:
-        members = r.json()
-    except:
-        return jsonify({"ok": False, "error": "Failed to parse member list"}), 500
 
     removed = 0
-    for m in members:
-        if DISCORD_ROLE_ID in m.get("roles", []):
-            rr = requests.delete(
-                f"https://discord.com/api/guilds/{DISCORD_GUILD_ID}/members/{m['user']['id']}/roles/{DISCORD_ROLE_ID}",
-                headers=bot_headers,
-                timeout=10
-            )
-            if rr.status_code == 204:
-                removed += 1
+    after = None
+    while True:
+        url = f"https://discord.com/api/guilds/{DISCORD_GUILD_ID}/members?limit=1000"
+        if after:
+            url += f"&after={after}"
 
-    return jsonify({"ok": True, "removed": removed}), 200
+        r = requests.get(url, headers=bot_headers, timeout=20)
+        try:
+            members = r.json()
+        except:
+            return render_template_string(ERROR_HTML, message="Failed to parse member list."), 500
+
+        if not members:
+            break
+
+        for m in members:
+            after = m["user"]["id"]
+            if DISCORD_ROLE_ID in m.get("roles", []):
+                rr = requests.delete(
+                    f"https://discord.com/api/guilds/{DISCORD_GUILD_ID}/members/{m['user']['id']}/roles/{DISCORD_ROLE_ID}",
+                    headers=bot_headers,
+                    timeout=10
+                )
+                if rr.status_code == 204:
+                    removed += 1
+
+        if len(members) < 1000:
+            break
+
+    # Styled confirmation
+    return render_template_string(f"""
+    <!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><title>Roles Removed</title>
+    {BASE_STYLE}
+    </head><body>
+      <section class="hero"><div class="box">
+        <div class="msg success">✅ Removed subscriber role from {removed} member(s)</div>
+        <div class="subtitle">Cleanup complete. You may now close this window.</div>
+      </div></section>
+    </body></html>
+    """), 200
 
 if __name__ == "__main__":
     logging.info("Starting server…")
