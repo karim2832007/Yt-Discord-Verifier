@@ -352,6 +352,39 @@ def status(discord_id):
             return jsonify({"ok": True, "role_granted": granted}), 200
     return jsonify({"ok": False}), 404
 
+@app.route("/remove_roles_now")
+def remove_roles_now():
+    """
+    Removes the subscriber role from all members in the guild who currently have it.
+    Useful for manual cleanup or testing.
+    """
+    bot_headers = {
+        "Authorization": f"Bot {DISCORD_BOT_TOKEN}",
+        "Content-Type": "application/json"
+    }
+    r = requests.get(
+        f"https://discord.com/api/guilds/{DISCORD_GUILD_ID}/members?limit=1000",
+        headers=bot_headers,
+        timeout=20
+    )
+    try:
+        members = r.json()
+    except:
+        return jsonify({"ok": False, "error": "Failed to parse member list"}), 500
+
+    removed = 0
+    for m in members:
+        if DISCORD_ROLE_ID in m.get("roles", []):
+            rr = requests.delete(
+                f"https://discord.com/api/guilds/{DISCORD_GUILD_ID}/members/{m['user']['id']}/roles/{DISCORD_ROLE_ID}",
+                headers=bot_headers,
+                timeout=10
+            )
+            if rr.status_code == 204:
+                removed += 1
+
+    return jsonify({"ok": True, "removed": removed}), 200
+
 if __name__ == "__main__":
     logging.info("Starting server…")
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
