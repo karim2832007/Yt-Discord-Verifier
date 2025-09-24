@@ -355,8 +355,8 @@ def status(discord_id):
 @app.route("/remove_roles_now")
 def remove_roles_now():
     """
-    Removes the subscriber role from all users stored in pending_activations.
-    This avoids Discord's member list limitations and guarantees full cleanup.
+    Scans all guild members and removes the subscriber role from anyone who has it.
+    Works even if roles were assigned manually.
     """
     bot_headers = {
         "Authorization": f"Bot {DISCORD_BOT_TOKEN}",
@@ -364,17 +364,34 @@ def remove_roles_now():
     }
 
     removed = 0
-    for entry in pending_activations.values():
-        discord_id = entry.get("discord_id")
-        if discord_id and entry.get("role_granted"):
-            rr = requests.delete(
-                f"https://discord.com/api/guilds/{DISCORD_GUILD_ID}/members/{discord_id}/roles/{DISCORD_ROLE_ID}",
-                headers=bot_headers,
-                timeout=10
-            )
-            if rr.status_code == 204:
-                removed += 1
-                entry["role_granted"] = False  # mark as removed
+    after = None
+    while True:
+        url = f"https://discord.com/api/guilds/{DISCORD_GUILD_ID}/members?limit=1000"
+        if after:
+            url += f"&after={after}"
+
+        r = requests.get(url, headers=bot_headers, timeout=20)
+        try:
+            members = r.json()
+        except:
+            return render_template_string(ERROR_HTML, message="Failed to parse member list."), 500
+
+        if not members:
+            break
+
+        for m in members:
+            after = m["user"]["id"]
+            if DISCORD_ROLE_ID in m.get("roles", []):
+                rr = requests.delete(
+                    f"https://discord.com/api/guilds/{DISCORD_GUILD_ID}/members/{m['user']['id']}/roles/{DISCORD_ROLE_ID}",
+                    headers=bot_headers,
+                    timeout=10
+                )
+                if rr.status_code == 204:
+                    removed += 1
+
+        if len(members) < 1000:
+            break
 
     return render_template_string(f"""
     <!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><title>Roles Removed</title>
