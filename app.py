@@ -297,6 +297,7 @@ def discord_login():
     )
     return redirect(oauth_url)
 
+
 @app.route("/discord/callback")
 def discord_callback():
     code = request.args.get("state")
@@ -360,6 +361,7 @@ def discord_callback():
                   else {"error": role_resp.text})
         return render_template_string(ERROR_HTML, message=f"Role failed: {detail}"), 400
 
+
 # ─────────────────────────────────────────────
 # Discord OAuth (Site login): identify-only + session
 # ─────────────────────────────────────────────
@@ -373,6 +375,7 @@ def discord_login_simple():
         "&scope=identify"
     )
     return redirect(oauth_url)
+
 
 @app.route("/login/discord/callback")
 def discord_callback_simple():
@@ -412,19 +415,86 @@ def discord_callback_simple():
         "discriminator": user.get("discriminator", "")
     }
 
-    # Redirect back to your IONOS homepage
-    return redirect("https://gaming-mods.com/index.html")
+    discord_id = user.get("id")
 
+    # Return a modal popup page
+    return f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <meta charset="utf-8">
+      <title>Confirm Your ID</title>
+      <style>
+        body {{
+          background:#0a0a0a; color:#eee; font-family:sans-serif;
+          display:flex; align-items:center; justify-content:center;
+          height:100vh; margin:0;
+        }}
+        .modal {{
+          background:#111; padding:2rem; border-radius:10px;
+          box-shadow:0 0 20px rgba(255,255,255,0.2); text-align:center;
+        }}
+        .id-box {{
+          font-size:1.2rem; margin:1rem 0; color:#FFD700;
+        }}
+        button {{
+          margin:0.5rem; padding:0.75rem 1.5rem; font-size:1rem;
+          border:none; border-radius:6px; cursor:pointer;
+        }}
+        #copyBtn {{ background:#444; color:#fff; }}
+        #continueBtn {{ background:#FFD700; color:#000; }}
+        #continueBtn:disabled {{ background:#555; color:#999; cursor:not-allowed; }}
+      </style>
+    </head>
+    <body>
+      <div class="modal">
+        <h2>✅ Logged in successfully!</h2>
+        <p>Please copy your Discord ID before continuing:</p>
+        <div class="id-box" id="discordId">{discord_id}</div>
+        <button id="copyBtn">Copy ID</button>
+        <button id="continueBtn" disabled>Continue</button>
+      </div>
+      <script>
+        const copyBtn = document.getElementById("copyBtn");
+        const continueBtn = document.getElementById("continueBtn");
+        const discordId = document.getElementById("discordId").innerText;
+
+        copyBtn.addEventListener("click", () => {{
+          navigator.clipboard.writeText(discordId).then(() => {{
+            alert("Discord ID copied to clipboard!");
+            continueBtn.disabled = false;
+          }});
+        }});
+
+        continueBtn.addEventListener("click", () => {{
+          window.location.href = "https://gaming-mods.com/index.html";
+        }});
+      </script>
+    </body>
+    </html>
+    """
+
+
+# ─────────────────────────────────────────────
+# Portal & session routes
+# ─────────────────────────────────────────────
 @app.route("/portal")
 def portal():
     return render_template_string(PORTAL_HTML, user=session.get("discord_user"))
+
 
 @app.route("/portal/me")
 def portal_me():
     user = session.get("discord_user")
     if not user:
         return jsonify({"ok": False, "message": "Not logged in"}), 401
-    return jsonify({"ok": True, "id": user["id"], "username": user["username"], "discriminator": user.get("discriminator", "")})
+    return jsonify({
+        "ok": True,
+        "id": user["id"],
+        "username": user["username"],
+        "discriminator": user.get("discriminator", "")
+    })
+
 
 @app.route("/logout")
 def logout():
@@ -440,12 +510,21 @@ def status(discord_id):
 
     # Global override wins
     if global_override:
-        return jsonify({"ok": True, "role_granted": True, "message": "⚡ Global admin override active"}), 200
+        return jsonify({
+            "ok": True,
+            "role_granted": True,
+            "message": "⚡ Global admin override active"
+        }), 200
 
     # Per-user override
     if admin_overrides.get(discord_id):
-        return jsonify({"ok": True, "role_granted": True, "message": "⚡ Admin override active"}), 200
+        return jsonify({
+            "ok": True,
+            "role_granted": True,
+            "message": "⚡ Admin override active"
+        }), 200
 
+    # Otherwise check Discord API
     bot_headers = {
         "Authorization": f"Bot {DISCORD_BOT_TOKEN}",
         "Content-Type": "application/json"
@@ -455,26 +534,38 @@ def status(discord_id):
         headers=bot_headers,
         timeout=10
     )
+
     if resp.status_code == 404:
         return jsonify({
             "ok": False,
+            "role_granted": False,
             "message": "You're not in the Discord server. Join and verify first."
         }), 404
+
     if resp.status_code != 200:
         return jsonify({
             "ok": False,
+            "role_granted": False,
             "message": f"Discord API error {resp.status_code}. Try again later."
         }), resp.status_code
 
     data = resp.json()
     roles = data.get("roles", [])
     if str(DISCORD_ROLE_ID) in [str(r) for r in roles]:
-        return jsonify({"ok": True, "role_granted": True, "message": "Subscriber role verified."}), 200
+        return jsonify({
+            "ok": True,
+            "role_granted": True,
+            "message": "Subscriber role verified."
+        }), 200
     else:
-        return jsonify({"ok": True, "role_granted": False,
-                        "message": "Subscriber role not found. Subscribe on YouTube and complete Discord verification."}), 200
+        return jsonify({
+            "ok": True,
+            "role_granted": False,
+            "message": "Subscriber role not found. Subscribe on YouTube and complete Discord verification."
+        }), 200
 
-# # ─────────────────────────────────────────────
+
+# ─────────────────────────────────────────────
 # Global Admin Override API
 # ─────────────────────────────────────────────
 @app.route("/override/all", methods=["GET"])
@@ -486,6 +577,7 @@ def get_override_all():
         return jsonify({"ok": False, "message": "Unauthorized"}), 403
     return jsonify({"ok": True, "override_all": global_override}), 200
 
+
 @app.route("/override/all", methods=["POST"])
 def set_override_all():
     """Enable global override (requires ?key=SECRET)."""
@@ -496,6 +588,7 @@ def set_override_all():
         return jsonify({"ok": False, "message": "Unauthorized"}), 403
     global_override = True
     return jsonify({"ok": True, "message": "Global override enabled"}), 200
+
 
 @app.route("/override/all", methods=["DELETE"])
 def clear_override_all():
@@ -520,6 +613,7 @@ def get_override(discord_id):
         "admin_override": bool(admin_overrides.get(discord_id, False))
     })
 
+
 @app.route("/override/<discord_id>", methods=["POST"])
 def set_override(discord_id):
     """Enable override for a specific user (requires ?key=SECRET)."""
@@ -529,7 +623,8 @@ def set_override(discord_id):
         return jsonify({"ok": False, "message": "Unauthorized"}), 403
 
     admin_overrides[discord_id] = True
-    return jsonify({"ok": True, "message": f"Override enabled for {discord_id}"})
+    return jsonify({"ok": True, "message": f"Override enabled for {discord_id}"}), 200
+
 
 @app.route("/override/<discord_id>", methods=["DELETE"])
 def clear_override(discord_id):
@@ -540,7 +635,7 @@ def clear_override(discord_id):
         return jsonify({"ok": False, "message": "Unauthorized"}), 403
 
     admin_overrides[discord_id] = False
-    return jsonify({"ok": True, "message": f"Override disabled for {discord_id}"})
+    return jsonify({"ok": True, "message": f"Override disabled for {discord_id}"}), 200
 
 # ─────────────────────────────────────────────
 # Role cleanup — remove subscriber role from everyone who has it
