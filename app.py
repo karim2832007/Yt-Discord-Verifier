@@ -43,6 +43,9 @@ DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 # In-memory activation store: code → { created_at, yt_verified, discord_id, role_granted, role_time }
 pending_activations = {}
 
+# Global override flag
+global_override = False
+
 # In-memory admin overrides { discord_id: bool }
 admin_overrides = {}
 
@@ -433,7 +436,13 @@ def logout():
 # ─────────────────────────────────────────────
 @app.route("/status/<discord_id>")
 def status(discord_id):
-    # Admin override wins
+    global global_override
+
+    # Global override wins
+    if global_override:
+        return jsonify({"ok": True, "role_granted": True, "message": "⚡ Global admin override active"}), 200
+
+    # Per-user override
     if admin_overrides.get(discord_id):
         return jsonify({"ok": True, "role_granted": True, "message": "⚡ Admin override active"}), 200
 
@@ -465,16 +474,55 @@ def status(discord_id):
         return jsonify({"ok": True, "role_granted": False,
                         "message": "Subscriber role not found. Subscribe on YouTube and complete Discord verification."}), 200
 
+# # ─────────────────────────────────────────────
+# Global Admin Override API
 # ─────────────────────────────────────────────
-# Remote admin override api
+@app.route("/override/all", methods=["GET"])
+def get_override_all():
+    """Check if global override is active."""
+    key = request.args.get("key")
+    admin_key = os.getenv("ADMIN_PANEL_KEY", os.getenv("SECRET_KEY", ""))
+    if admin_key and key != admin_key:
+        return jsonify({"ok": False, "message": "Unauthorized"}), 403
+    return jsonify({"ok": True, "override_all": global_override}), 200
+
+@app.route("/override/all", methods=["POST"])
+def set_override_all():
+    """Enable global override (requires ?key=SECRET)."""
+    global global_override
+    key = request.args.get("key")
+    admin_key = os.getenv("ADMIN_PANEL_KEY", os.getenv("SECRET_KEY", ""))
+    if admin_key and key != admin_key:
+        return jsonify({"ok": False, "message": "Unauthorized"}), 403
+    global_override = True
+    return jsonify({"ok": True, "message": "Global override enabled"}), 200
+
+@app.route("/override/all", methods=["DELETE"])
+def clear_override_all():
+    """Disable global override (requires ?key=SECRET)."""
+    global global_override
+    key = request.args.get("key")
+    admin_key = os.getenv("ADMIN_PANEL_KEY", os.getenv("SECRET_KEY", ""))
+    if admin_key and key != admin_key:
+        return jsonify({"ok": False, "message": "Unauthorized"}), 403
+    global_override = False
+    return jsonify({"ok": True, "message": "Global override disabled"}), 200
+
+
+# ─────────────────────────────────────────────
+# Per-user Admin Override API
 # ─────────────────────────────────────────────
 @app.route("/override/<discord_id>", methods=["GET"])
 def get_override(discord_id):
-    return jsonify({"ok": True, "admin_override": bool(admin_overrides.get(discord_id, False))})
+    """Check if override is active for a specific user."""
+    return jsonify({
+        "ok": True,
+        "admin_override": bool(admin_overrides.get(discord_id, False))
+    })
 
 @app.route("/override/<discord_id>", methods=["POST"])
 def set_override(discord_id):
-    # Optional: protect with a key (pass ?key=SECRET)
+    """Enable override for a specific user (requires ?key=SECRET)."""
     key = request.args.get("key")
     admin_key = os.getenv("ADMIN_PANEL_KEY", os.getenv("SECRET_KEY", ""))
     if admin_key and key != admin_key:
@@ -485,6 +533,7 @@ def set_override(discord_id):
 
 @app.route("/override/<discord_id>", methods=["DELETE"])
 def clear_override(discord_id):
+    """Disable override for a specific user (requires ?key=SECRET)."""
     key = request.args.get("key")
     admin_key = os.getenv("ADMIN_PANEL_KEY", os.getenv("SECRET_KEY", ""))
     if admin_key and key != admin_key:
