@@ -5,16 +5,22 @@ import string
 import logging
 import requests
 from dotenv import load_dotenv
-from flask import Flask, redirect, request, jsonify, render_template_string, session, url_for
+from flask import Flask, redirect, request, jsonify, render_template_string, session
 
 # ─────────────────────────────────────────────
-# Setup & Configuration
+# Setup & configuration
 # ─────────────────────────────────────────────
 load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
 app = Flask(__name__, static_folder="static", static_url_path="/static")
 app.secret_key = os.getenv("SECRET_KEY", secrets.token_hex(16))
+
+# Allow session cookies to be sent between verifier.gaming-mods.com and gaming-mods.com
+app.config.update(
+    SESSION_COOKIE_SAMESITE="None",
+    SESSION_COOKIE_SECURE=True
+)
 
 BASE_URL = os.getenv("BASE_URL", "").rstrip("/")
 YOUTUBE_CHANNEL_ID = os.getenv("YOUTUBE_CHANNEL_ID")
@@ -57,7 +63,7 @@ def is_expired(timestamp: int, ttl: int) -> bool:
     return (now() - timestamp) > ttl
 
 # ─────────────────────────────────────────────
-# Styles & Templates
+# Styles & templates
 # ─────────────────────────────────────────────
 BASE_STYLE = """
 <link rel="icon" href="/static/favicon.ico">
@@ -193,7 +199,7 @@ PORTAL_HTML = """
 """
 
 # ─────────────────────────────────────────────
-# Routes — Landing
+# Routes — landing
 # ─────────────────────────────────────────────
 @app.route("/")
 def home():
@@ -402,7 +408,9 @@ def discord_callback_simple():
         "username": user.get("username"),
         "discriminator": user.get("discriminator", "")
     }
-    return redirect(url_for("portal"))
+
+    # Redirect back to your IONOS homepage
+    return redirect("https://gaming-mods.com/index.html")
 
 @app.route("/portal")
 def portal():
@@ -418,7 +426,7 @@ def portal_me():
 @app.route("/logout")
 def logout():
     session.pop("discord_user", None)
-    return redirect(url_for("portal"))
+    return redirect("https://gaming-mods.com/index.html")
 
 # ─────────────────────────────────────────────
 # Ren'Py client status check
@@ -458,7 +466,7 @@ def status(discord_id):
                         "message": "Subscriber role not found. Subscribe on YouTube and complete Discord verification."}), 200
 
 # ─────────────────────────────────────────────
-# Remote Admin Override API
+# Remote admin override api
 # ─────────────────────────────────────────────
 @app.route("/override/<discord_id>", methods=["GET"])
 def get_override(discord_id):
