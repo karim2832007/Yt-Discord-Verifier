@@ -6,13 +6,12 @@ import logging
 import requests
 from dotenv import load_dotenv
 from flask import Flask, redirect, request, jsonify, render_template_string, session
-from flask_cors import CORS
 
 # ---------------------
 # Setup & configuration
 # ---------------------
 load_dotenv()
-logging.basicConfig(level=logging.INFO, format="%((asctime)s %(levelname)s %(message)s")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
 app = Flask(__name__, static_folder="static", static_url_path="/static")
 app.secret_key = os.getenv("SECRET_KEY", secrets.token_hex(16))
@@ -23,9 +22,18 @@ app.config.update(
     SESSION_COOKIE_SECURE=True
 )
 
-# Enable CORS so the frontend can send credentials
-CORS(app, supports_credentials=True)
+# ---------------------
+# Manual CORS for gaming-mods.com
+# ---------------------
+@app.after_request
+def add_cors_headers(response):
+    response.headers["Access-Control-Allow-Origin"] = "https://gaming-mods.com"
+    response.headers["Access-Control-Allow-Credentials"] = "true"
+    return response
 
+# ---------------------
+# Environment variables
+# ---------------------
 BASE_URL = os.getenv("BASE_URL", "").rstrip("/")
 YOUTUBE_CHANNEL_ID = os.getenv("YOUTUBE_CHANNEL_ID")
 
@@ -36,22 +44,20 @@ GOOGLE_REDIRECT = os.getenv("GOOGLE_REDIRECT")
 DISCORD_CLIENT_ID = os.getenv("DISCORD_CLIENT_ID")
 DISCORD_CLIENT_SECRET = os.getenv("DISCORD_CLIENT_SECRET")
 DISCORD_REDIRECT = os.getenv("DISCORD_REDIRECT")
-DISCORD_REDIRECT_SIMPLE = os.getenv("DISCORD_REDIRECT_SIMPLE") or (
-    BASE_URL + "/login/discord/callback"
-)
+DISCORD_REDIRECT_SIMPLE = os.getenv("DISCORD_REDIRECT_SIMPLE") or (BASE_URL + "/login/discord/callback")
 
 DISCORD_GUILD_ID = os.getenv("DISCORD_GUILD_ID")
 DISCORD_ROLE_ID = os.getenv("DISCORD_ROLE_ID")
 DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 
-# In-memory stores
-pending_activations = {}     # code -> activation data
-global_override = False      # boolean flag
-admin_overrides = {}         # discord_id -> bool
-
-# TTLs (seconds)
-CODE_TTL = 15 * 60
-ACTIVATION_TTL = 15 * 60
+# ---------------------
+# In-memory stores & TTLs
+# ---------------------
+pending_activations = {}     # code -> { created_at, yt_verified, discord_id, role_granted, role_time }
+global_override     = False  # admin global toggle
+admin_overrides     = {}     # discord_id -> bool
+CODE_TTL            = 15 * 60
+ACTIVATION_TTL      = 15 * 60
 
 # ---------------------
 # Helpers
@@ -66,65 +72,39 @@ def is_expired(timestamp: int, ttl: int) -> bool:
     return (now() - timestamp) > ttl
 
 # ---------------------
-# Styles & templates
+# Styles & HTML templates
 # ---------------------
 BASE_STYLE = """
 <link rel="icon" href="/static/favicon.ico">
 <style>
 * { margin:0; padding:0; box-sizing:border-box; }
-body,html {
-  width:100%; height:100%; overflow:hidden;
-  background:#0a0a0a; color:#eee;
-  font-family:'Segoe UI', sans-serif; font-size:18px;
-}
-.hero {
-  display:flex; flex-direction:column; align-items:center; justify-content:center;
-  width:100%; height:100vh;
-  background:radial-gradient(circle at center,#111 0%,#000 80%);
-}
-.hero::before {
-  content:""; position:absolute; top:0; left:0;
-  width:100%; height:100%;
-  background:
-    linear-gradient(rgba(255,255,255,0.05) 1px, transparent 1px) 0 0,
-    linear-gradient(90deg, rgba(255,255,255,0.05) 1px, transparent 1px) 0 0;
-  background-size:50px 50px; opacity:0.1;
-  animation:shiftGrid 30s linear infinite;
-}
-@keyframes shiftGrid {
-  from { background-position:0 0; }
-  to   { background-position:1000px 1000px; }
-}
+body,html { width:100%; height:100%; overflow:hidden;
+  background:#0a0a0a; color:#eee; font-family:'Segoe UI',sans-serif; }
+.hero { display:flex; flex-direction:column; align-items:center;
+  justify-content:center; width:100%; height:100vh;
+  background:radial-gradient(circle at center,#111 0%,#000 80%); }
+.hero::before { content:""; position:absolute; top:0; left:0;
+  width:100%; height:100%; background:
+    linear-gradient(rgba(255,255,255,0.05) 1px,transparent 1px) 0 0,
+    linear-gradient(90deg,rgba(255,255,255,0.05) 1px,transparent 1px) 0 0;
+  background-size:50px 50px; opacity:0.1; animation:shiftGrid 30s linear infinite; }
+@keyframes shiftGrid { from{background-position:0 0;} to{background-position:1000px 1000px;} }
 .box { position:relative; z-index:1; text-align:center; padding:2rem; }
-.title {
-  font-size:3.5rem; color:#FFD700;
-  text-shadow:0 0 10px #B8860B; animation:fadeInDown 1.5s ease-out;
-}
-@keyframes fadeInDown {
-  from { opacity:0; transform:translateY(-50px); }
-  to   { opacity:1; transform:translateY(0); }
-}
-.subtitle {
-  margin-top:1rem; font-size:1.5rem; color:#ccc; animation:fadeIn 2s ease-in-out;
-}
+.title { font-size:3.5rem; color:#FFD700; text-shadow:0 0 10px #B8860B;
+  animation:fadeInDown 1.5s ease-out; }
+@keyframes fadeInDown { from{opacity:0;transform:translateY(-50px);} to{opacity:1;transform:translateY(0);} }
+.subtitle { margin-top:1rem; font-size:1.5rem; color:#ccc; animation:fadeIn 2s ease-in-out; }
 .info { margin-top:1.25rem; font-size:1.5rem; color:#fff; }
 @keyframes fadeIn { from{opacity:0;} to{opacity:1;} }
-.cta {
-  margin-top:2rem; padding:1rem 2rem; font-size:1.25rem;
-  font-weight:bold; color:#fff; background:rgba(255,255,255,0.1);
-  border:2px solid #fff; border-radius:8px; cursor:pointer; transition:.3s;
-  animation:fadeInUp 1.5s ease-out; display:inline-block;
-}
-.cta:hover {
-  transform:scale(1.05); box-shadow:0 0 20px rgba(255,255,255,0.5);
-}
-@keyframes fadeInUp {
-  from { opacity:0; transform:translateY(50px); }
-  to   { opacity:1; transform:translateY(0); }
-}
+.cta { margin-top:2rem; padding:1rem 2rem; font-size:1.25rem; font-weight:bold;
+  color:#fff; background:rgba(255,255,255,0.1); border:2px solid #fff;
+  border-radius:8px; cursor:pointer; transition:.3s; animation:fadeInUp 1.5s ease-out;
+  display:inline-block; text-decoration:none; }
+.cta:hover { transform:scale(1.05); box-shadow:0 0 20px rgba(255,255,255,0.5); }
+@keyframes fadeInUp { from{opacity:0;transform:translateY(50px);} to{opacity:1;transform:translateY(0);} }
 .msg { margin-top:2rem; font-size:2rem; }
 .msg.success { color:#0f0; }
-.msg.error   { color:#f00; }
+.msg.error { color:#f00; }
 </style>
 """
 
@@ -138,9 +118,7 @@ INDEX_HTML = """
     One-click YouTube login & Discord role grant<br>
     for exclusive mods and tools.
   </div>
-  <button class="cta" onclick="location.href='{{ google_url }}'">
-    Login with Google
-  </button>
+  <button class="cta" onclick="location.href='{{ google_url }}'">Login with Google</button>
   <a href="/login/discord" class="cta">Login with Discord</a>
 </div></section>
 </body></html>
@@ -152,12 +130,8 @@ SUCCESS_HTML = """
 </head><body>
 <section class="hero"><div class="box">
   <div class="msg success">✅ Subscriber role granted!</div>
-  <div class="info">
-    Your Discord ID: <strong>{{ discord_id }}</strong>
-  </div>
-  <div class="subtitle">
-    Copy this ID into your game within 15 minutes.
-  </div>
+  <div class="info">Your Discord ID: <strong>{{ discord_id }}</strong></div>
+  <div class="subtitle">Copy this ID into your game within 15 minutes.</div>
 </div></section>
 </body></html>
 """
@@ -168,9 +142,7 @@ ERROR_HTML = """
 </head><body>
 <section class="hero"><div class="box">
   <div class="msg error">❌ {{ message }}</div>
-  <div class="subtitle">
-    Please try again or contact support.
-  </div>
+  <div class="subtitle">Please try again or contact support.</div>
 </div></section>
 </body></html>
 """
@@ -182,9 +154,7 @@ PORTAL_HTML = """
 <section class="hero"><div class="box">
   <div class="title">Gaming Mods Portal</div>
   {% if user %}
-    <div class="info">
-      Logged in as: <strong>{{ user['username'] }}#{{ user.get('discriminator','') }}</strong>
-    </div>
+    <div class="info">Logged in as: <strong>{{ user['username'] }}#{{ user.get('discriminator','') }}</strong></div>
     <div class="subtitle">Discord ID: {{ user['id'] }}</div>
     <a href="/logout" class="cta">Logout</a>
   {% else %}
@@ -196,7 +166,7 @@ PORTAL_HTML = """
 """
 
 # ---------------------
-# Routes — landing
+# Routes — landing page
 # ---------------------
 @app.route("/")
 def home():
@@ -246,7 +216,6 @@ def google_callback():
         headers={"Content-Type": "application/x-www-form-urlencoded"},
         timeout=10
     ).json()
-
     token = token_data.get("access_token")
     if not token:
         return render_template_string(ERROR_HTML, message="Google auth failed."), 400
@@ -255,7 +224,6 @@ def google_callback():
     url = "https://www.googleapis.com/youtube/v3/subscriptions"
     params = {"part": "snippet", "mine": "true", "maxResults": 50}
     subscribed = False
-
     while True:
         resp = requests.get(url, headers=headers, params=params, timeout=10).json()
         for item in resp.get("items", []):
@@ -273,7 +241,7 @@ def google_callback():
     return redirect(f"{BASE_URL}/discord/login?code={code}")
 
 # ---------------------
-# Discord OAuth (verifier): join guild + role
+# Discord OAuth (verifier): join guild + assign role
 # ---------------------
 @app.route("/discord/login")
 def discord_login():
@@ -312,7 +280,6 @@ def discord_callback():
         headers={"Content-Type": "application/x-www-form-urlencoded"},
         timeout=10
     ).json()
-
     access = token_data.get("access_token")
     if not access:
         return render_template_string(ERROR_HTML, message="Discord auth failed."), 400
@@ -330,7 +297,6 @@ def discord_callback():
         "Authorization": f"Bot {DISCORD_BOT_TOKEN}",
         "Content-Type": "application/json"
     }
-
     # Ensure member exists in guild
     requests.put(
         f"https://discord.com/api/guilds/{DISCORD_GUILD_ID}/members/{discord_id}",
@@ -338,28 +304,24 @@ def discord_callback():
         json={"access_token": access},
         timeout=10
     )
-
     # Assign role
     role_resp = requests.put(
-        f"https://discord.com/api/guilds/{DISCORD_GUILD_ID}/members/"
-        f"{discord_id}/roles/{DISCORD_ROLE_ID}",
+        f"https://discord.com/api/guilds/{DISCORD_GUILD_ID}/members/{discord_id}/roles/{DISCORD_ROLE_ID}",
         headers=bot_headers,
         timeout=10
     )
-
     granted = role_resp.status_code in (201, 204)
-    entry["discord_id"] = discord_id
-    entry["role_granted"] = granted
-    entry["role_time"] = now()
+    entry["discord_id"]     = discord_id
+    entry["role_granted"]   = granted
+    entry["role_time"]      = now()
 
     if granted:
         logging.info(f"Role granted to {discord_id}")
         return render_template_string(SUCCESS_HTML, discord_id=discord_id)
-    else:
-        detail = (role_resp.json()
-                  if role_resp.headers.get("Content-Type", "").startswith("application/json")
-                  else {"error": role_resp.text})
-        return render_template_string(ERROR_HTML, message=f"Role failed: {detail}"), 400
+    detail = (role_resp.json()
+              if role_resp.headers.get("Content-Type","").startswith("application/json")
+              else {"error": role_resp.text})
+    return render_template_string(ERROR_HTML, message=f"Role failed: {detail}"), 400
 
 # ---------------------
 # Discord OAuth (site login): identify + session
@@ -394,7 +356,6 @@ def discord_callback_simple():
         headers={"Content-Type": "application/x-www-form-urlencoded"},
         timeout=10
     ).json()
-
     access = token_data.get("access_token")
     if not access:
         return render_template_string(ERROR_HTML, message="Discord login failed."), 400
@@ -410,27 +371,24 @@ def discord_callback_simple():
     session["discord_user"] = {
         "id": user["id"],
         "username": user["username"],
-        "discriminator": user.get("discriminator", "")
+        "discriminator": user.get("discriminator","")
     }
     discord_id = user["id"]
 
-    # Modal popup forcing copy, then continue
+    # Modal popup forcing copy, then redirect
     return f"""
     <!DOCTYPE html><html><head><meta charset="utf-8"><title>Confirm ID</title>
-    <style>
-      body {{ background:#0a0a0a; color:#eee; font-family:sans-serif;
-             display:flex; align-items:center; justify-content:center;
-             height:100vh; margin:0; }}
-      .modal {{ background:#111; padding:2rem; border-radius:10px;
-               box-shadow:0 0 20px rgba(255,255,255,0.2); text-align:center; }}
-      .id-box {{ font-size:1.2rem; margin:1rem 0; color:#FFD700; }}
-      button {{ margin:0.5rem; padding:0.75rem 1.5rem; font-size:1rem;
-               border:none; border-radius:6px; cursor:pointer; }}
-      #copyBtn {{ background:#444; color:#fff; }}
-      #continueBtn {{ background:#FFD700; color:#000; }}
-      #continueBtn:disabled {{ background:#555; color:#999; cursor:not-allowed; }}
-    </style>
-    </head><body>
+    <style>body{{background:#0a0a0a;color:#eee;font-family:sans-serif;
+      display:flex;align-items:center;justify-content:center;height:100vh;margin:0;}}
+      .modal{{background:#111;padding:2rem;border-radius:10px;
+      box-shadow:0 0 20px rgba(255,255,255,0.2);text-align:center;}}
+      .id-box{{font-size:1.2rem;margin:1rem 0;color:#FFD700;}}
+      button{{margin:0.5rem;padding:0.75rem 1.5rem;font-size:1rem;
+      border:none;border-radius:6px;cursor:pointer;}}
+      #copyBtn{{background:#444;color:#fff;}}
+      #continueBtn{{background:#FFD700;color:#000;}}
+      #continueBtn:disabled{{background:#555;color:#999;cursor:not-allowed;}}
+    </style></head><body>
       <div class="modal">
         <h2>✅ Logged in successfully!</h2>
         <p>Please copy your Discord ID before continuing:</p>
@@ -443,12 +401,12 @@ def discord_callback_simple():
         const continueBtn = document.getElementById("continueBtn");
         const discordId = document.getElementById("discordId").innerText;
         copyBtn.addEventListener("click", () => {{
-          navigator.clipboard.writeText(discordId).then(() => {{
+          navigator.clipboard.writeText(discordId).then(()=>{{
             alert("Copied!");
             continueBtn.disabled = false;
           }});
         }});
-        continueBtn.addEventListener("click", () => {{
+        continueBtn.addEventListener("click", ()=>{{
           window.location.href = "{BASE_URL}/";
         }});
       </script>
@@ -468,11 +426,10 @@ def portal_me():
     if not user:
         return jsonify({"ok": False, "message": "Not logged in"}), 401
     return jsonify({
-        "ok": True,
-        "id": user["id"],
+        "ok": True, "id": user["id"],
         "username": user["username"],
-        "discriminator": user.get("discriminator", "")
-    })
+        "discriminator": user.get("discriminator","")
+    }), 200
 
 @app.route("/logout")
 def logout():
@@ -480,20 +437,18 @@ def logout():
     return redirect(BASE_URL + "/")
 
 # ---------------------
-# RenPy client status check
+# RenPy status check
 # ---------------------
 @app.route("/status/<discord_id>")
 def status(discord_id):
     global global_override
-    # Global override
     if global_override:
         return jsonify({"ok": True, "role_granted": True,
                         "message": "⚡ Global admin override active"}), 200
-    # Per-user override
     if admin_overrides.get(discord_id):
         return jsonify({"ok": True, "role_granted": True,
                         "message": "⚡ Admin override active"}), 200
-    # Check Discord API
+
     bot_headers = {"Authorization": f"Bot {DISCORD_BOT_TOKEN}",
                    "Content-Type": "application/json"}
     resp = requests.get(
@@ -502,28 +457,26 @@ def status(discord_id):
     )
     if resp.status_code == 404:
         return jsonify({"ok": False, "role_granted": False,
-                        "message": "Not in the server."}), 404
+                        "message": "Not in the Discord server."}), 404
     if resp.status_code != 200:
         return jsonify({"ok": False, "role_granted": False,
                         "message": f"Discord API error {resp.status_code}"}), resp.status_code
+
     data = resp.json()
-    roles = data.get("roles", [])
-    granted = str(DISCORD_ROLE_ID) in [str(r) for r in roles]
+    granted = str(DISCORD_ROLE_ID) in [str(r) for r in data.get("roles",[])]
     return jsonify({"ok": True, "role_granted": granted,
-                    "message": granted
-                      and "Subscriber role verified."
-                      or "Subscriber role not found."}), 200
+                    "message": granted and "Subscriber role verified." or
+                               "Subscriber role not found."}), 200
 
 # ---------------------
-# Global Admin Override API
+# Global override API
 # ---------------------
-@app.route("/override/all", methods=["GET", "POST", "DELETE"])
+@app.route("/override/all", methods=["GET","POST","DELETE"])
 def override_all():
     key = request.args.get("key")
-    admin_key = os.getenv("ADMIN_PANEL_KEY", os.getenv("SECRET_KEY", ""))
+    admin_key = os.getenv("ADMIN_PANEL_KEY", os.getenv("SECRET_KEY",""))
     if admin_key and key != admin_key:
         return jsonify({"ok": False, "message": "Unauthorized"}), 403
-
     global global_override
     if request.method == "GET":
         return jsonify({"ok": True, "override_all": global_override}), 200
@@ -535,28 +488,26 @@ def override_all():
     return jsonify({"ok": True, "message": "Global override disabled"}), 200
 
 # ---------------------
-# Per-user Admin Override API
+# Per-user override API
 # ---------------------
-@app.route("/override/<discord_id>", methods=["GET", "POST", "DELETE"])
+@app.route("/override/<discord_id>", methods=["GET","POST","DELETE"])
 def override_user(discord_id):
-    key = request.args.get("key")
-    admin_key = os.getenv("ADMIN_PANEL_KEY", os.getenv("SECRET_KEY", ""))
     if request.method == "GET":
         return jsonify({"ok": True,
                         "admin_override": bool(admin_overrides.get(discord_id))}), 200
 
+    key = request.args.get("key")
+    admin_key = os.getenv("ADMIN_PANEL_KEY", os.getenv("SECRET_KEY",""))
     if admin_key and key != admin_key:
         return jsonify({"ok": False, "message": "Unauthorized"}), 403
 
     if request.method == "POST":
         admin_overrides[discord_id] = True
-        return jsonify({"ok": True,
-                        "message": f"Override enabled for {discord_id}"}), 200
+        return jsonify({"ok": True, "message": f"Override enabled for {discord_id}"}), 200
 
     # DELETE
     admin_overrides[discord_id] = False
-    return jsonify({"ok": True,
-                    "message": f"Override disabled for {discord_id}"}), 200
+    return jsonify({"ok": True, "message": f"Override disabled for {discord_id}"}), 200
 
 # ---------------------
 # Role cleanup endpoint
@@ -570,20 +521,16 @@ def remove_roles_now():
     while True:
         url = (f"https://discord.com/api/guilds/{DISCORD_GUILD_ID}/members"
                "?limit=1000" + (f"&after={after}" if after else ""))
-
         r = requests.get(url, headers=bot_headers, timeout=20)
         try:
             members = r.json()
-        except Exception:
-            return render_template_string(ERROR_HTML,
-                                         message="Failed to parse member list."), 500
-
+        except:
+            return render_template_string(ERROR_HTML, message="Failed to parse member list."), 500
         if not members:
             break
-
         for m in members:
             after = m["user"]["id"]
-            if str(DISCORD_ROLE_ID) in [str(r) for r in m.get("roles", [])]:
+            if str(DISCORD_ROLE_ID) in [str(r) for r in m.get("roles",[])]:
                 rr = requests.delete(
                     f"https://discord.com/api/guilds/{DISCORD_GUILD_ID}/members/"
                     f"{m['user']['id']}/roles/{DISCORD_ROLE_ID}",
@@ -591,10 +538,8 @@ def remove_roles_now():
                 )
                 if rr.status_code == 204:
                     removed += 1
-
         if len(members) < 1000:
             break
-
     return render_template_string(f"""
 <!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><title>Roles Removed</title>
 {BASE_STYLE}
