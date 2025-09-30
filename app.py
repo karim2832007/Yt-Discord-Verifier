@@ -1,4 +1,3 @@
-python
 import os
 import time
 import secrets
@@ -6,67 +5,57 @@ import string
 import logging
 import requests
 from dotenv import load_dotenv
-from flask import Flask, redirect, request, jsonify, rendertemplatestring, session
+from flask import Flask, redirect, request, jsonify, render_template_string, session
 from flask_cors import CORS
 
-─────────────────────────────────────────────
-
-Setup & configuration
-
-─────────────────────────────────────────────
+# ---------------------
+# Setup & configuration
+# ---------------------
 load_dotenv()
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+logging.basicConfig(level=logging.INFO, format="%((asctime)s %(levelname)s %(message)s")
 
-app = Flask(name, staticfolder="static", staticurl_path="/static")
-app.secretkey = os.getenv("SECRETKEY", secrets.token_hex(16))
+app = Flask(__name__, static_folder="static", static_url_path="/static")
+app.secret_key = os.getenv("SECRET_KEY", secrets.token_hex(16))
 
-Allow session cookies to be sent between verifier.gaming-mods.com and gaming-mods.com
+# Allow cross-domain session cookies
 app.config.update(
-    SESSIONCOOKIESAMESITE="None",
-    SESSIONCOOKIESECURE=True
+    SESSION_COOKIE_SAMESITE="None",
+    SESSION_COOKIE_SECURE=True
 )
 
-Enable CORS with credentials so frontend JS can fetch /portal/me
+# Enable CORS so the frontend can send credentials
 CORS(app, supports_credentials=True)
 
-BASEURL = os.getenv("BASEURL", "").rstrip("/")
-YOUTUBECHANNELID = os.getenv("YOUTUBECHANNELID")
+BASE_URL = os.getenv("BASE_URL", "").rstrip("/")
+YOUTUBE_CHANNEL_ID = os.getenv("YOUTUBE_CHANNEL_ID")
 
-GOOGLECLIENTID = os.getenv("GOOGLECLIENTID")
-GOOGLECLIENTSECRET = os.getenv("GOOGLECLIENTSECRET")
-GOOGLEREDIRECT = os.getenv("GOOGLEREDIRECT")
+GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
+GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET")
+GOOGLE_REDIRECT = os.getenv("GOOGLE_REDIRECT")
 
-DISCORDCLIENTID = os.getenv("DISCORDCLIENTID")
-DISCORDCLIENTSECRET = os.getenv("DISCORDCLIENTSECRET")
+DISCORD_CLIENT_ID = os.getenv("DISCORD_CLIENT_ID")
+DISCORD_CLIENT_SECRET = os.getenv("DISCORD_CLIENT_SECRET")
+DISCORD_REDIRECT = os.getenv("DISCORD_REDIRECT")
+DISCORD_REDIRECT_SIMPLE = os.getenv("DISCORD_REDIRECT_SIMPLE") or (
+    BASE_URL + "/login/discord/callback"
+)
 
-Verifier flow (YouTube → Discord join + role) callback
-DISCORDREDIRECT = os.getenv("DISCORDREDIRECT")
+DISCORD_GUILD_ID = os.getenv("DISCORD_GUILD_ID")
+DISCORD_ROLE_ID = os.getenv("DISCORD_ROLE_ID")
+DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 
-Simple site login (identify-only) callback; defaults to BASE_URL/login/discord/callback
-DISCORDREDIRECTSIMPLE = os.getenv("DISCORDREDIRECTSIMPLE") or (BASE_URL + "/login/discord/callback")
+# In-memory stores
+pending_activations = {}     # code -> activation data
+global_override = False      # boolean flag
+admin_overrides = {}         # discord_id -> bool
 
-DISCORDGUILDID = os.getenv("DISCORDGUILDID")
-DISCORDROLEID = os.getenv("DISCORDROLEID")
-DISCORDBOTTOKEN = os.getenv("DISCORDBOTTOKEN")
+# TTLs (seconds)
+CODE_TTL = 15 * 60
+ACTIVATION_TTL = 15 * 60
 
-In-memory activation store: code → { createdat, ytverified, discordid, rolegranted, role_time }
-pending_activations = {}
-
-Global override flag
-global_override = False
-
-In-memory admin overrides { discord_id: bool }
-admin_overrides = {}
-
-Time-to-live settings
-CODE_TTL = 15 * 60       # 15 min to complete YouTube step
-ACTIVATION_TTL = 15 * 60 # 15 min to use Discord ID in-game
-
-─────────────────────────────────────────────
-
-Helpers
-
-─────────────────────────────────────────────
+# ---------------------
+# Helpers
+# ---------------------
 def now() -> int:
     return int(time.time())
 
@@ -76,11 +65,9 @@ def gen_code(n: int = 6) -> str:
 def is_expired(timestamp: int, ttl: int) -> bool:
     return (now() - timestamp) > ttl
 
-─────────────────────────────────────────────
-
-Styles & templates
-
-─────────────────────────────────────────────
+# ---------------------
+# Styles & templates
+# ---------------------
 BASE_STYLE = """
 <link rel="icon" href="/static/favicon.ico">
 <style>
@@ -91,8 +78,7 @@ body,html {
   font-family:'Segoe UI', sans-serif; font-size:18px;
 }
 .hero {
-  position:relative; display:flex; flex-direction:column;
-  align-items:center; justify-content:center;
+  display:flex; flex-direction:column; align-items:center; justify-content:center;
   width:100%; height:100vh;
   background:radial-gradient(circle at center,#111 0%,#000 80%);
 }
@@ -112,32 +98,25 @@ body,html {
 .box { position:relative; z-index:1; text-align:center; padding:2rem; }
 .title {
   font-size:3.5rem; color:#FFD700;
-  text-shadow:0 0 10px #B8860B;
-  animation:fadeInDown 1.5s ease-out;
+  text-shadow:0 0 10px #B8860B; animation:fadeInDown 1.5s ease-out;
 }
 @keyframes fadeInDown {
   from { opacity:0; transform:translateY(-50px); }
   to   { opacity:1; transform:translateY(0); }
 }
 .subtitle {
-  margin-top:1rem; font-size:1.5rem; color:#ccc;
-  animation:fadeIn 2s ease-in-out;
+  margin-top:1rem; font-size:1.5rem; color:#ccc; animation:fadeIn 2s ease-in-out;
 }
-.info {
-  margin-top:1.25rem; font-size:1.5rem; color:#fff;
-}
+.info { margin-top:1.25rem; font-size:1.5rem; color:#fff; }
 @keyframes fadeIn { from{opacity:0;} to{opacity:1;} }
 .cta {
   margin-top:2rem; padding:1rem 2rem; font-size:1.25rem;
   font-weight:bold; color:#fff; background:rgba(255,255,255,0.1);
-  border:2px solid #fff; border-radius:8px;
-  cursor:pointer; transition:.3s;
-  animation:fadeInUp 1.5s ease-out;
-  display:inline-block;
+  border:2px solid #fff; border-radius:8px; cursor:pointer; transition:.3s;
+  animation:fadeInUp 1.5s ease-out; display:inline-block;
 }
 .cta:hover {
-  transform:scale(1.05);
-  box-shadow:0 0 20px rgba(255,255,255,0.5);
+  transform:scale(1.05); box-shadow:0 0 20px rgba(255,255,255,0.5);
 }
 @keyframes fadeInUp {
   from { opacity:0; transform:translateY(50px); }
@@ -154,15 +133,15 @@ INDEX_HTML = """
 """ + BASE_STYLE + """
 </head><body>
 <section class="hero"><div class="box">
-<div class="title">Gaming Mods Membership</div>
-<div class="subtitle">
-One-click YouTube login & Discord role grant<br>
-for exclusive mods and tools.
-</div>
-<button class="cta" onclick="location.href='{{ google_url }}'">
-Login with Google
-</button>
-<a href="/login/discord" class="cta">Login with Discord</a>
+  <div class="title">Gaming Mods Membership</div>
+  <div class="subtitle">
+    One-click YouTube login & Discord role grant<br>
+    for exclusive mods and tools.
+  </div>
+  <button class="cta" onclick="location.href='{{ google_url }}'">
+    Login with Google
+  </button>
+  <a href="/login/discord" class="cta">Login with Discord</a>
 </div></section>
 </body></html>
 """
@@ -172,13 +151,13 @@ SUCCESS_HTML = """
 """ + BASE_STYLE + """
 </head><body>
 <section class="hero"><div class="box">
-<div class="msg success">✅ Subscriber role granted!</div>
-<div class="info">
-Your Discord ID: <strong>{{ discord_id }}</strong>
-</div>
-<div class="subtitle">
-Copy this ID into your game within 15 minutes.
-</div>
+  <div class="msg success">✅ Subscriber role granted!</div>
+  <div class="info">
+    Your Discord ID: <strong>{{ discord_id }}</strong>
+  </div>
+  <div class="subtitle">
+    Copy this ID into your game within 15 minutes.
+  </div>
 </div></section>
 </body></html>
 """
@@ -188,10 +167,10 @@ ERROR_HTML = """
 """ + BASE_STYLE + """
 </head><body>
 <section class="hero"><div class="box">
-<div class="msg error">❌ {{ message }}</div>
-<div class="subtitle">
-Please try again or contact support.
-</div>
+  <div class="msg error">❌ {{ message }}</div>
+  <div class="subtitle">
+    Please try again or contact support.
+  </div>
 </div></section>
 </body></html>
 """
@@ -201,33 +180,31 @@ PORTAL_HTML = """
 """ + BASE_STYLE + """
 </head><body>
 <section class="hero"><div class="box">
-<div class="title">Gaming Mods Portal</div>
-{% if user %}
-  <div class="info">Logged in as: <strong>{{ user['username'] }}#{{ user.get('discriminator','') }}</strong></div>
-  <div class="subtitle">Discord ID: {{ user['id'] }}</div>
-  <a href="/logout" class="cta">Logout</a>
-{% else %}
-  <div class="subtitle">Login to access your membership and tools.</div>
-  <a href="/login/discord" class="cta">Login with Discord</a>
-{% endif %}
+  <div class="title">Gaming Mods Portal</div>
+  {% if user %}
+    <div class="info">
+      Logged in as: <strong>{{ user['username'] }}#{{ user.get('discriminator','') }}</strong>
+    </div>
+    <div class="subtitle">Discord ID: {{ user['id'] }}</div>
+    <a href="/logout" class="cta">Logout</a>
+  {% else %}
+    <div class="subtitle">Login to access your membership and tools.</div>
+    <a href="/login/discord" class="cta">Login with Discord</a>
+  {% endif %}
 </div></section>
 </body></html>
 """
 
-─────────────────────────────────────────────
-
-Routes — landing
-
-─────────────────────────────────────────────
+# ---------------------
+# Routes — landing
+# ---------------------
 @app.route("/")
 def home():
-    return rendertemplatestring(INDEXHTML, googleurl=f"{BASE_URL}/google/login")
+    return render_template_string(INDEX_HTML, google_url=f"{BASE_URL}/google/login")
 
-─────────────────────────────────────────────
-
-Google OAuth → YouTube subscription verify
-
-─────────────────────────────────────────────
+# ---------------------
+# Google OAuth → YouTube verify
+# ---------------------
 @app.route("/google/login")
 def google_login():
     code = gen_code()
@@ -241,10 +218,10 @@ def google_login():
     logging.info(f"New activation code: {code}")
     oauth_url = (
         "https://accounts.google.com/o/oauth2/v2/auth"
-        f"?clientid={GOOGLECLIENT_ID}"
-        f"&redirecturi={GOOGLEREDIRECT}"
+        f"?client_id={GOOGLE_CLIENT_ID}"
+        f"&redirect_uri={GOOGLE_REDIRECT}"
         "&scope=https://www.googleapis.com/auth/youtube.readonly"
-        "&responsetype=code&accesstype=online&prompt=consent"
+        "&response_type=code&access_type=online&prompt=consent"
         f"&state={code}"
     )
     return redirect(oauth_url)
@@ -253,34 +230,36 @@ def google_login():
 def google_callback():
     code = request.args.get("state")
     entry = pending_activations.get(code)
-    if not entry or isexpired(entry["createdat"], CODE_TTL):
+    if not entry or is_expired(entry["created_at"], CODE_TTL):
         pending_activations.pop(code, None)
-        return rendertemplatestring(ERROR_HTML, message="Session expired."), 400
+        return render_template_string(ERROR_HTML, message="Session expired."), 400
 
     token_data = requests.post(
         "https://oauth2.googleapis.com/token",
         data={
-            "clientid": GOOGLECLIENT_ID,
-            "clientsecret": GOOGLECLIENT_SECRET,
+            "client_id": GOOGLE_CLIENT_ID,
+            "client_secret": GOOGLE_CLIENT_SECRET,
             "code": request.args.get("code"),
-            "redirecturi": GOOGLEREDIRECT,
-            "granttype": "authorizationcode"
+            "redirect_uri": GOOGLE_REDIRECT,
+            "grant_type": "authorization_code"
         },
         headers={"Content-Type": "application/x-www-form-urlencoded"},
         timeout=10
     ).json()
-    token = tokendata.get("accesstoken")
+
+    token = token_data.get("access_token")
     if not token:
-        return rendertemplatestring(ERROR_HTML, message="Google auth failed."), 400
+        return render_template_string(ERROR_HTML, message="Google auth failed."), 400
 
     headers = {"Authorization": f"Bearer {token}"}
     url = "https://www.googleapis.com/youtube/v3/subscriptions"
     params = {"part": "snippet", "mine": "true", "maxResults": 50}
     subscribed = False
+
     while True:
         resp = requests.get(url, headers=headers, params=params, timeout=10).json()
         for item in resp.get("items", []):
-            if item.get("snippet", {}).get("resourceId", {}).get("channelId") == YOUTUBECHANNELID:
+            if item.get("snippet", {}).get("resourceId", {}).get("channelId") == YOUTUBE_CHANNEL_ID:
                 subscribed = True
                 break
         if subscribed or not resp.get("nextPageToken"):
@@ -288,28 +267,26 @@ def google_callback():
         params["pageToken"] = resp["nextPageToken"]
 
     if not subscribed:
-        return rendertemplatestring(ERROR_HTML, message="YouTube subscription not found."), 400
+        return render_template_string(ERROR_HTML, message="YouTube subscription not found."), 400
 
     entry["yt_verified"] = True
     return redirect(f"{BASE_URL}/discord/login?code={code}")
 
-─────────────────────────────────────────────
-
-Discord OAuth (Verifier flow): join guild + assign role
-
-─────────────────────────────────────────────
+# ---------------------
+# Discord OAuth (verifier): join guild + role
+# ---------------------
 @app.route("/discord/login")
 def discord_login():
     code = request.args.get("code")
     entry = pending_activations.get(code)
-    if not entry or not entry["ytverified"] or isexpired(entry["createdat"], CODETTL):
+    if not entry or not entry["yt_verified"] or is_expired(entry["created_at"], CODE_TTL):
         pending_activations.pop(code, None)
-        return rendertemplatestring(ERROR_HTML, message="Activation expired."), 400
+        return render_template_string(ERROR_HTML, message="Activation expired."), 400
 
     oauth_url = (
         "https://discord.com/api/oauth2/authorize"
-        f"?clientid={DISCORDCLIENT_ID}"
-        f"&redirecturi={DISCORDREDIRECT}"
+        f"?client_id={DISCORD_CLIENT_ID}"
+        f"&redirect_uri={DISCORD_REDIRECT}"
         "&response_type=code"
         "&scope=identify%20guilds.join"
         f"&state={code}"
@@ -321,23 +298,24 @@ def discord_callback():
     code = request.args.get("state")
     entry = pending_activations.get(code)
     if not entry:
-        return rendertemplatestring(ERROR_HTML, message="Session expired."), 400
+        return render_template_string(ERROR_HTML, message="Session expired."), 400
 
     token_data = requests.post(
         "https://discord.com/api/oauth2/token",
         data={
-            "clientid": DISCORDCLIENT_ID,
-            "clientsecret": DISCORDCLIENT_SECRET,
-            "granttype": "authorizationcode",
+            "client_id": DISCORD_CLIENT_ID,
+            "client_secret": DISCORD_CLIENT_SECRET,
+            "grant_type": "authorization_code",
             "code": request.args.get("code"),
-            "redirecturi": DISCORDREDIRECT
+            "redirect_uri": DISCORD_REDIRECT
         },
         headers={"Content-Type": "application/x-www-form-urlencoded"},
         timeout=10
     ).json()
-    access = tokendata.get("accesstoken")
+
+    access = token_data.get("access_token")
     if not access:
-        return rendertemplatestring(ERROR_HTML, message="Discord auth failed."), 400
+        return render_template_string(ERROR_HTML, message="Discord auth failed."), 400
 
     user = requests.get(
         "https://discord.com/api/users/@me",
@@ -346,77 +324,80 @@ def discord_callback():
     ).json()
     discord_id = user.get("id")
     if not discord_id:
-        return rendertemplatestring(ERROR_HTML, message="Failed to fetch Discord user."), 400
+        return render_template_string(ERROR_HTML, message="Failed to fetch Discord user."), 400
 
     bot_headers = {
-        "Authorization": f"Bot {DISCORDBOTTOKEN}",
+        "Authorization": f"Bot {DISCORD_BOT_TOKEN}",
         "Content-Type": "application/json"
     }
-    # Ensure member exists in guild (join)
+
+    # Ensure member exists in guild
     requests.put(
-        f"https://discord.com/api/guilds/{DISCORDGUILDID}/members/{discord_id}",
+        f"https://discord.com/api/guilds/{DISCORD_GUILD_ID}/members/{discord_id}",
         headers=bot_headers,
         json={"access_token": access},
         timeout=10
     )
+
     # Assign role
     role_resp = requests.put(
-        f"https://discord.com/api/guilds/{DISCORDGUILDID}/members/{discordid}/roles/{DISCORDROLE_ID}",
+        f"https://discord.com/api/guilds/{DISCORD_GUILD_ID}/members/"
+        f"{discord_id}/roles/{DISCORD_ROLE_ID}",
         headers=bot_headers,
         timeout=10
     )
-    granted = roleresp.statuscode in (201, 204)
-    entry["discordid"] = discordid
+
+    granted = role_resp.status_code in (201, 204)
+    entry["discord_id"] = discord_id
     entry["role_granted"] = granted
     entry["role_time"] = now()
 
     if granted:
         logging.info(f"Role granted to {discord_id}")
-        return rendertemplatestring(SUCCESSHTML, discordid=discord_id)
+        return render_template_string(SUCCESS_HTML, discord_id=discord_id)
     else:
         detail = (role_resp.json()
                   if role_resp.headers.get("Content-Type", "").startswith("application/json")
                   else {"error": role_resp.text})
-        return rendertemplatestring(ERROR_HTML, message=f"Role failed: {detail}"), 400
+        return render_template_string(ERROR_HTML, message=f"Role failed: {detail}"), 400
 
-─────────────────────────────────────────────
-
-Discord OAuth (Site login): identify-only + session
-
-─────────────────────────────────────────────
+# ---------------------
+# Discord OAuth (site login): identify + session
+# ---------------------
 @app.route("/login/discord")
-def discordloginsimple():
+def discord_login_simple():
     oauth_url = (
         "https://discord.com/api/oauth2/authorize"
-        f"?clientid={DISCORDCLIENT_ID}"
-        f"&redirecturi={DISCORDREDIRECT_SIMPLE}"
+        f"?client_id={DISCORD_CLIENT_ID}"
+        f"&redirect_uri={DISCORD_REDIRECT_SIMPLE}"
         "&response_type=code"
         "&scope=identify"
     )
     return redirect(oauth_url)
 
 @app.route("/login/discord/callback")
-def discordcallbacksimple():
+def discord_callback_simple():
     code = request.args.get("code")
     if not code:
-        return rendertemplatestring(ERROR_HTML, message="Missing code."), 400
+        return render_template_string(ERROR_HTML, message="Missing code."), 400
 
     token_data = requests.post(
         "https://discord.com/api/oauth2/token",
         data={
-            "clientid": DISCORDCLIENT_ID,
-            "clientsecret": DISCORDCLIENT_SECRET,
-            "granttype": "authorizationcode",
+            "client_id": DISCORD_CLIENT_ID,
+            "client_secret": DISCORD_CLIENT_SECRET,
+            "grant_type": "authorization_code",
             "code": code,
-            "redirecturi": DISCORDREDIRECT_SIMPLE,
+            "redirect_uri": DISCORD_REDIRECT_SIMPLE,
             "scope": "identify"
         },
         headers={"Content-Type": "application/x-www-form-urlencoded"},
         timeout=10
     ).json()
-    access = tokendata.get("accesstoken")
+
+    access = token_data.get("access_token")
     if not access:
-        return rendertemplatestring(ERROR_HTML, message="Discord login failed."), 400
+        return render_template_string(ERROR_HTML, message="Discord login failed."), 400
 
     user = requests.get(
         "https://discord.com/api/users/@me",
@@ -424,47 +405,32 @@ def discordcallbacksimple():
         timeout=10
     ).json()
     if not user.get("id"):
-        return rendertemplatestring(ERROR_HTML, message="Failed to fetch Discord user."), 400
+        return render_template_string(ERROR_HTML, message="Failed to fetch Discord user."), 400
 
-    # Save user in session
     session["discord_user"] = {
-        "id": user.get("id"),
-        "username": user.get("username"),
+        "id": user["id"],
+        "username": user["username"],
         "discriminator": user.get("discriminator", "")
     }
+    discord_id = user["id"]
 
-    discord_id = user.get("id")
-
-    # Return a modal popup page (forces copy, then continue)
+    # Modal popup forcing copy, then continue
     return f"""
-    <!DOCTYPE html>
-    <html>
-    <head>
-      <meta charset="utf-8">
-      <title>Confirm Your ID</title>
-      <style>
-        body {{
-          background:#0a0a0a; color:#eee; font-family:sans-serif;
-          display:flex; align-items:center; justify-content:center;
-          height:100vh; margin:0;
-        }}
-        .modal {{
-          background:#111; padding:2rem; border-radius:10px;
-          box-shadow:0 0 20px rgba(255,255,255,0.2); text-align:center;
-        }}
-        .id-box {{
-          font-size:1.2rem; margin:1rem 0; color:#FFD700;
-        }}
-        button {{
-          margin:0.5rem; padding:0.75rem 1.5rem; font-size:1rem;
-          border:none; border-radius:6px; cursor:pointer;
-        }}
-        #copyBtn {{ background:#444; color:#fff; }}
-        #continueBtn {{ background:#FFD700; color:#000; }}
-        #continueBtn:disabled {{ background:#555; color:#999; cursor:not-allowed; }}
-      </style>
-    </head>
-    <body>
+    <!DOCTYPE html><html><head><meta charset="utf-8"><title>Confirm ID</title>
+    <style>
+      body {{ background:#0a0a0a; color:#eee; font-family:sans-serif;
+             display:flex; align-items:center; justify-content:center;
+             height:100vh; margin:0; }}
+      .modal {{ background:#111; padding:2rem; border-radius:10px;
+               box-shadow:0 0 20px rgba(255,255,255,0.2); text-align:center; }}
+      .id-box {{ font-size:1.2rem; margin:1rem 0; color:#FFD700; }}
+      button {{ margin:0.5rem; padding:0.75rem 1.5rem; font-size:1rem;
+               border:none; border-radius:6px; cursor:pointer; }}
+      #copyBtn {{ background:#444; color:#fff; }}
+      #continueBtn {{ background:#FFD700; color:#000; }}
+      #continueBtn:disabled {{ background:#555; color:#999; cursor:not-allowed; }}
+    </style>
+    </head><body>
       <div class="modal">
         <h2>✅ Logged in successfully!</h2>
         <p>Please copy your Discord ID before continuing:</p>
@@ -476,30 +442,25 @@ def discordcallbacksimple():
         const copyBtn = document.getElementById("copyBtn");
         const continueBtn = document.getElementById("continueBtn");
         const discordId = document.getElementById("discordId").innerText;
-
         copyBtn.addEventListener("click", () => {{
           navigator.clipboard.writeText(discordId).then(() => {{
-            alert("Discord ID copied to clipboard!");
+            alert("Copied!");
             continueBtn.disabled = false;
           }});
         }});
-
         continueBtn.addEventListener("click", () => {{
-          window.location.href = "https://gaming-mods.com/index.html";
+          window.location.href = "{BASE_URL}/";
         }});
       </script>
-    </body>
-    </html>
+    </body></html>
     """
 
-─────────────────────────────────────────────
-
-Portal & session routes
-
-─────────────────────────────────────────────
+# ---------------------
+# Portal & session routes
+# ---------------------
 @app.route("/portal")
 def portal():
-    return rendertemplatestring(PORTALHTML, user=session.get("discorduser"))
+    return render_template_string(PORTAL_HTML, user=session.get("discord_user"))
 
 @app.route("/portal/me")
 def portal_me():
@@ -516,183 +477,117 @@ def portal_me():
 @app.route("/logout")
 def logout():
     session.pop("discord_user", None)
-    return redirect("https://gaming-mods.com/index.html")
+    return redirect(BASE_URL + "/")
 
-─────────────────────────────────────────────
-
-Ren'Py client status check
-
-─────────────────────────────────────────────
+# ---------------------
+# RenPy client status check
+# ---------------------
 @app.route("/status/<discord_id>")
 def status(discord_id):
     global global_override
-
-    # Global override wins
+    # Global override
     if global_override:
-        return jsonify({
-            "ok": True,
-            "role_granted": True,
-            "message": "⚡ Global admin override active"
-        }), 200
-
+        return jsonify({"ok": True, "role_granted": True,
+                        "message": "⚡ Global admin override active"}), 200
     # Per-user override
-    if adminoverrides.get(discordid):
-        return jsonify({
-            "ok": True,
-            "role_granted": True,
-            "message": "⚡ Admin override active"
-        }), 200
-
-    # Otherwise check Discord API
-    bot_headers = {
-        "Authorization": f"Bot {DISCORDBOTTOKEN}",
-        "Content-Type": "application/json"
-    }
+    if admin_overrides.get(discord_id):
+        return jsonify({"ok": True, "role_granted": True,
+                        "message": "⚡ Admin override active"}), 200
+    # Check Discord API
+    bot_headers = {"Authorization": f"Bot {DISCORD_BOT_TOKEN}",
+                   "Content-Type": "application/json"}
     resp = requests.get(
-        f"https://discord.com/api/guilds/{DISCORDGUILDID}/members/{discord_id}",
-        headers=bot_headers,
-        timeout=10
+        f"https://discord.com/api/guilds/{DISCORD_GUILD_ID}/members/{discord_id}",
+        headers=bot_headers, timeout=10
     )
-
     if resp.status_code == 404:
-        return jsonify({
-            "ok": False,
-            "role_granted": False,
-            "message": "You're not in the Discord server. Join and verify first."
-        }), 404
-
+        return jsonify({"ok": False, "role_granted": False,
+                        "message": "Not in the server."}), 404
     if resp.status_code != 200:
-        return jsonify({
-            "ok": False,
-            "role_granted": False,
-            "message": f"Discord API error {resp.status_code}. Try again later."
-        }), resp.status_code
-
+        return jsonify({"ok": False, "role_granted": False,
+                        "message": f"Discord API error {resp.status_code}"}), resp.status_code
     data = resp.json()
     roles = data.get("roles", [])
-    if str(DISCORDROLEID) in [str(r) for r in roles]:
-        return jsonify({
-            "ok": True,
-            "role_granted": True,
-            "message": "Subscriber role verified."
-        }), 200
-    else:
-        return jsonify({
-            "ok": True,
-            "role_granted": False,
-            "message": "Subscriber role not found. Subscribe on YouTube and complete Discord verification."
-        }), 200
+    granted = str(DISCORD_ROLE_ID) in [str(r) for r in roles]
+    return jsonify({"ok": True, "role_granted": granted,
+                    "message": granted
+                      and "Subscriber role verified."
+                      or "Subscriber role not found."}), 200
 
-─────────────────────────────────────────────
-
-Global Admin Override API
-
-─────────────────────────────────────────────
-@app.route("/override/all", methods=["GET"])
-def getoverrideall():
-    """Check if global override is active."""
+# ---------------------
+# Global Admin Override API
+# ---------------------
+@app.route("/override/all", methods=["GET", "POST", "DELETE"])
+def override_all():
     key = request.args.get("key")
-    adminkey = os.getenv("ADMINPANELKEY", os.getenv("SECRETKEY", ""))
-    if adminkey and key != adminkey:
+    admin_key = os.getenv("ADMIN_PANEL_KEY", os.getenv("SECRET_KEY", ""))
+    if admin_key and key != admin_key:
         return jsonify({"ok": False, "message": "Unauthorized"}), 403
-    return jsonify({"ok": True, "overrideall": globaloverride}), 200
 
-@app.route("/override/all", methods=["POST"])
-def setoverrideall():
-    """Enable global override (requires ?key=SECRET)."""
     global global_override
-    key = request.args.get("key")
-    adminkey = os.getenv("ADMINPANELKEY", os.getenv("SECRETKEY", ""))
-    if adminkey and key != adminkey:
-        return jsonify({"ok": False, "message": "Unauthorized"}), 403
-    global_override = True
-    return jsonify({"ok": True, "message": "Global override enabled"}), 200
-
-@app.route("/override/all", methods=["DELETE"])
-def clearoverrideall():
-    """Disable global override (requires ?key=SECRET)."""
-    global global_override
-    key = request.args.get("key")
-    adminkey = os.getenv("ADMINPANELKEY", os.getenv("SECRETKEY", ""))
-    if adminkey and key != adminkey:
-        return jsonify({"ok": False, "message": "Unauthorized"}), 403
+    if request.method == "GET":
+        return jsonify({"ok": True, "override_all": global_override}), 200
+    if request.method == "POST":
+        global_override = True
+        return jsonify({"ok": True, "message": "Global override enabled"}), 200
+    # DELETE
     global_override = False
     return jsonify({"ok": True, "message": "Global override disabled"}), 200
 
-─────────────────────────────────────────────
-
-Per-user Admin Override API
-
-─────────────────────────────────────────────
-@app.route("/override/<discord_id>", methods=["GET"])
-def getoverride(discordid):
-    """Check if override is active for a specific user."""
-    return jsonify({
-        "ok": True,
-        "adminoverride": bool(adminoverrides.get(discord_id, False))
-    })
-
-@app.route("/override/<discord_id>", methods=["POST"])
-def setoverride(discordid):
-    """Enable override for a specific user (requires ?key=SECRET)."""
+# ---------------------
+# Per-user Admin Override API
+# ---------------------
+@app.route("/override/<discord_id>", methods=["GET", "POST", "DELETE"])
+def override_user(discord_id):
     key = request.args.get("key")
-    adminkey = os.getenv("ADMINPANELKEY", os.getenv("SECRETKEY", ""))
-    if adminkey and key != adminkey:
+    admin_key = os.getenv("ADMIN_PANEL_KEY", os.getenv("SECRET_KEY", ""))
+    if request.method == "GET":
+        return jsonify({"ok": True,
+                        "admin_override": bool(admin_overrides.get(discord_id))}), 200
+
+    if admin_key and key != admin_key:
         return jsonify({"ok": False, "message": "Unauthorized"}), 403
 
-    adminoverrides[discordid] = True
-    return jsonify({"ok": True, "message": f"Override enabled for {discord_id}"}), 200
+    if request.method == "POST":
+        admin_overrides[discord_id] = True
+        return jsonify({"ok": True,
+                        "message": f"Override enabled for {discord_id}"}), 200
 
-@app.route("/override/<discord_id>", methods=["DELETE"])
-def clearoverride(discordid):
-    """Disable override for a specific user (requires ?key=SECRET)."""
-    key = request.args.get("key")
-    adminkey = os.getenv("ADMINPANELKEY", os.getenv("SECRETKEY", ""))
-    if adminkey and key != adminkey:
-        return jsonify({"ok": False, "message": "Unauthorized"}), 403
+    # DELETE
+    admin_overrides[discord_id] = False
+    return jsonify({"ok": True,
+                    "message": f"Override disabled for {discord_id}"}), 200
 
-    adminoverrides[discordid] = False
-    return jsonify({"ok": True, "message": f"Override disabled for {discord_id}"}), 200
-
-─────────────────────────────────────────────
-
-Role cleanup — remove subscriber role from everyone who has it
-
-─────────────────────────────────────────────
-@app.route("/removerolesnow")
-def removerolesnow():
-    """
-    Scans all guild members and removes the subscriber role from anyone who has it.
-    Works even if roles were assigned manually.
-    """
-    bot_headers = {
-        "Authorization": f"Bot {DISCORDBOTTOKEN}",
-        "Content-Type": "application/json"
-    }
-
+# ---------------------
+# Role cleanup endpoint
+# ---------------------
+@app.route("/remove_roles_now")
+def remove_roles_now():
+    bot_headers = {"Authorization": f"Bot {DISCORD_BOT_TOKEN}",
+                   "Content-Type": "application/json"}
     removed = 0
     after = None
     while True:
-        url = f"https://discord.com/api/guilds/{DISCORDGUILDID}/members?limit=1000"
-        if after:
-            url += f"&after={after}"
+        url = (f"https://discord.com/api/guilds/{DISCORD_GUILD_ID}/members"
+               "?limit=1000" + (f"&after={after}" if after else ""))
 
         r = requests.get(url, headers=bot_headers, timeout=20)
         try:
             members = r.json()
         except Exception:
-            return rendertemplatestring(ERROR_HTML, message="Failed to parse member list."), 500
+            return render_template_string(ERROR_HTML,
+                                         message="Failed to parse member list."), 500
 
         if not members:
             break
 
         for m in members:
             after = m["user"]["id"]
-            if str(DISCORDROLEID) in [str(r) for r in m.get("roles", [])]:
+            if str(DISCORD_ROLE_ID) in [str(r) for r in m.get("roles", [])]:
                 rr = requests.delete(
-                    f"https://discord.com/api/guilds/{DISCORDGUILDID}/members/{m['user']['id']}/roles/{DISCORDROLEID}",
-                    headers=bot_headers,
-                    timeout=10
+                    f"https://discord.com/api/guilds/{DISCORD_GUILD_ID}/members/"
+                    f"{m['user']['id']}/roles/{DISCORD_ROLE_ID}",
+                    headers=bot_headers, timeout=10
                 )
                 if rr.status_code == 204:
                     removed += 1
@@ -700,32 +595,25 @@ def removerolesnow():
         if len(members) < 1000:
             break
 
-    return rendertemplatestring(f"""
+    return render_template_string(f"""
 <!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><title>Roles Removed</title>
 {BASE_STYLE}
-</head><body>
-<section class="hero"><div class="box">
+</head><body><section class="hero"><div class="box">
 <div class="msg success">✅ Removed subscriber role from {removed} member(s)</div>
-<div class="subtitle">Cleanup complete. You may now close this window.</div>
-</div></section>
-</body></html>
+<div class="subtitle">Cleanup complete. Close this window.</div>
+</div></section></body></html>
 """), 200
 
-─────────────────────────────────────────────
-
-Health check
-
-─────────────────────────────────────────────
+# ---------------------
+# Health check
+# ---------------------
 @app.route("/healthz")
 def healthz():
     return jsonify({"ok": True}), 200
 
-─────────────────────────────────────────────
-
-Entrypoint
-
-─────────────────────────────────────────────
-if name == "main":
+# ---------------------
+# Entrypoint
+# ---------------------
+if __name__ == "__main__":
     logging.info("Starting server…")
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
-
