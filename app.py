@@ -14,7 +14,6 @@ from flask import (
 )
 from dotenv import load_dotenv
 from flask_cors import CORS
-CORS(app, origins=["https://gaming-mods.com"], supports_credentials=True)
 
 # ------------------------------------------------------------------------------
 # Load environment and configure app
@@ -33,6 +32,9 @@ app.config.update(
     SESSION_COOKIE_SECURE=True,
     SESSION_COOKIE_SAMESITE="None",
 )
+
+# ✅ Apply CORS *after* app is created
+CORS(app, origins=["https://gaming-mods.com"], supports_credentials=True)
 
 # ------------------------------------------------------------------------------
 # Discord & Owner settings
