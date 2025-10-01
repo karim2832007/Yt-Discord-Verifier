@@ -365,11 +365,19 @@ def override_user(did):
 def list_overrides():
     if not require_owner():
         return jsonify({"ok": False, "message": "Forbidden"}), 403
+    users = []
+    for did in admin_overrides.keys():
+        users.append({
+            "id": did,
+            "username": admin_overrides[did].get("username", ""),  # if you store it
+            "discriminator": admin_overrides[did].get("discriminator", "")
+        })
     return jsonify({
         "ok": True,
         "global_override": global_override,
-        "users": sorted(admin_overrides.keys())
+        "users": users
     }), 200
+
 
 # ------------------------------------------------------------------------------
 # Immediate Role Removal Endpoint (Owner Only)
