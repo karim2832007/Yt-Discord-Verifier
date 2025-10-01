@@ -178,7 +178,7 @@ def serve_index():
 def serve_admin():
     if not require_owner():
         return "Forbidden", 403
-    return send_from_directory("static", "admin.html")
+    return send_from_directory("https://gaming-mods.com/admin.html")
 
 # ------------------------------------------------------------------------------
 # Discord OAuth Flow
@@ -298,7 +298,7 @@ def portal_me():
 @app.route("/logout")
 def logout():
     session.clear()
-    return jsonify({"ok": True, "message": "Logged out"}), 200
+    return redirect("https://gaming-mods.com")
 
 @app.route("/status/<did>")
 def status(did):
@@ -358,9 +358,7 @@ def list_overrides():
         "global_override": global_override,
         "users": sorted(admin_overrides.keys())
     }), 200
-@app.route("/admin")
-def admin_page():
-    return send_from_directory(app.static_folder, "admin.html")
+
 # ------------------------------------------------------------------------------
 # Immediate Role Removal Endpoint (Owner Only)
 # ------------------------------------------------------------------------------
