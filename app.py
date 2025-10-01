@@ -369,6 +369,41 @@ def remove_role_now(did):
     success = discord_remove_role(did)
     status_code = 200 if success else 500
     return jsonify({"ok": success, "discord_id": did}), status_code
+    @app.route("/remove_role_all", methods=["POST"])
+def remove_role_all():
+    if not require_owner():
+        return jsonify({"ok": False, "message": "Forbidden"}), 403
+
+    url = f"https://discord.com/api/guilds/{DISCORD_GUILD_ID}/members?limit=1000"
+    headers = {"Authorization": f"Bot {DISCORD_BOT_TOKEN}"}
+    resp = requests.get(url, headers=headers, timeout=15)
+
+    if resp.status_code != 200:
+        return jsonify({"ok": False, "message": "Failed to fetch members"}), 500
+
+    members = resp.json()
+    removed, failed = [], []
+
+    for m in members:
+        did = str(m["user"]["id"])
+        r = requests.delete(
+            f"https://discord.com/api/guilds/{DISCORD_GUILD_ID}/members/{did}/roles/{DISCORD_ROLE_ID}",
+            headers=headers,
+            timeout=15
+        )
+        if r.status_code in (200, 204):
+            removed.append(did)
+        else:
+            failed.append(did)
+
+    return jsonify({
+        "ok": True,
+        "removed_count": len(removed),
+        "failed_count": len(failed),
+        "removed_sample": removed[:10],
+        "failed_sample": failed[:10]
+    }), 200
+
 
 # ------------------------------------------------------------------------------
 # Run development server
