@@ -54,6 +54,32 @@ global_override = False
 admin_overrides = {}
 login_history = []
 
+# ------------------------------------------------------------------------------  
+# Persistent override state (JSON file)  
+# ------------------------------------------------------------------------------  
+import json, os
+
+STATE_FILE = "override_state.json"
+
+def save_state():
+    with open(STATE_FILE, "w") as f:
+        json.dump({
+            "global_override": global_override,
+            "admin_overrides": admin_overrides
+        }, f)
+
+def load_state():
+    global global_override, admin_overrides
+    if os.path.exists(STATE_FILE):
+        with open(STATE_FILE) as f:
+            data = json.load(f)
+            global_override = data.get("global_override", False)
+            admin_overrides = data.get("admin_overrides", {})
+
+# Load persisted state at startup
+load_state()
+
+
 # ------------------------------------------------------------------------------
 # CSRF‐state TTL and logging
 # ------------------------------------------------------------------------------
@@ -356,41 +382,62 @@ def override_all():
     global global_override
     if not require_owner():
         return jsonify({"ok": False, "message": "Forbidden"}), 403
+
     if request.method == "GET":
         return jsonify({"ok": True, "global_override": global_override}), 200
+
     if request.method == "POST":
         global_override = True
+        save_state()   # persist change
         return jsonify({"ok": True, "global_override": True}), 200
+
     if request.method == "DELETE":
         global_override = False
+        save_state()   # persist change
         return jsonify({"ok": True, "global_override": False}), 200
+
     return jsonify({"ok": False, "message": "Method not allowed"}), 405
+
 
 @app.route("/override/<did>", methods=["GET", "POST", "DELETE"])
 def override_user(did):
     if not require_owner():
         return jsonify({"ok": False, "message": "Forbidden"}), 403
+
     if request.method == "GET":
-        return jsonify({"ok": True, "user_override": bool(admin_overrides.get(did)), "discord_id": did}), 200
+        return jsonify({
+            "ok": True,
+            "user_override": bool(admin_overrides.get(did)),
+            "discord_id": did
+        }), 200
+
     if request.method == "POST":
-        admin_overrides[did] = True
+        # You can store richer info here if you want (username, discriminator)
+        admin_overrides[did] = {"username": "", "discriminator": ""}
+        save_state()   # persist change
         return jsonify({"ok": True, "user_override": True, "discord_id": did}), 200
+
     if request.method == "DELETE":
         admin_overrides.pop(did, None)
+        save_state()   # persist change
         return jsonify({"ok": True, "user_override": False, "discord_id": did}), 200
+
     return jsonify({"ok": False, "message": "Method not allowed"}), 405
+
 
 @app.route("/override", methods=["GET"])
 def list_overrides():
     if not require_owner():
         return jsonify({"ok": False, "message": "Forbidden"}), 403
+
     users = []
-    for did in admin_overrides.keys():
+    for did, info in admin_overrides.items():
         users.append({
             "id": did,
-            "username": admin_overrides[did].get("username", ""),  # if you store it
-            "discriminator": admin_overrides[did].get("discriminator", "")
+            "username": info.get("username", ""),
+            "discriminator": info.get("discriminator", "")
         })
+
     return jsonify({
         "ok": True,
         "global_override": global_override,
