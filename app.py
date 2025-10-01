@@ -179,13 +179,16 @@ def serve_index():
 def serve_admin():
     if not require_owner():
         return "Forbidden", 403
-    return send_from_directory("https://gaming-mods.com/admin.html")
+    # Serve admin.html from the local static folder
+    return send_from_directory("static", "admin.html")
+
 
 @app.route("/admin/logins")
 def admin_logins():
     if not require_owner():
         return jsonify({"ok": False, "message": "Forbidden"}), 403
     return jsonify({"ok": True, "logins": login_history}), 200
+
 
 
 # ------------------------------------------------------------------------------
@@ -315,15 +318,31 @@ def logout():
 @app.route("/status/<did>")
 def status(did):
     if global_override:
-        return jsonify({"ok": True, "role_granted": True,  "message": "Global override"}), 200
+        return jsonify({
+            "ok": True,
+            "role_granted": True,
+            "message": "🌍 GLOBAL OVERRIDE ACTIVE — All players have been granted access by the Admin Council!"
+        }), 200
+
     if admin_overrides.get(did):
-        return jsonify({"ok": True, "role_granted": True, "message": "Admin override"}), 200
+        return jsonify({
+            "ok": True,
+            "role_granted": True,
+            "message": "👑 ADMIN OVERRIDE — Your account has been hand‑picked and empowered with unlimited access!"
+        }), 200
+
     member = discord_member(did)
     if "roles" in member:
         has = discord_has_role(member)
-        msg = "Subscriber role verified." if has else "Subscriber role not found."
+        msg = "✨ Subscriber role verified — welcome, honored supporter!" if has else "❌ Subscriber role not found — verify your YouTube subscription."
         return jsonify({"ok": True, "role_granted": has, "message": msg}), 200
-    return jsonify({"ok": False, "role_granted": False, "message": f"Member error ({member.get('status_code')})"}), 404
+
+    return jsonify({
+        "ok": False,
+        "role_granted": False,
+        "message": f"⚠️ Member error (status {member.get('status_code')})"
+    }), 404
+
 
 @app.route("/health")
 def health():
