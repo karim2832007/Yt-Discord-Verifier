@@ -265,7 +265,7 @@ def _discord_callback():
   });
   contBtn.addEventListener('click', () => {
     if (!contBtn.disabled) {
-      window.location.href = '/?discord_id=' + encodeURIComponent(did);
+      window.location.href = 'https://gaming-mods.com/?discord_id=' + encodeURIComponent(did);
     }
   });
 </script>
