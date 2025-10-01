@@ -13,6 +13,8 @@ from flask import (
     send_from_directory, render_template_string
 )
 from dotenv import load_dotenv
+from flask_cors import CORS
+CORS(app, origins=["https://gaming-mods.com"], supports_credentials=True)
 
 # ------------------------------------------------------------------------------
 # Load environment and configure app
