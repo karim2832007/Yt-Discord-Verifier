@@ -358,7 +358,9 @@ def list_overrides():
         "global_override": global_override,
         "users": sorted(admin_overrides.keys())
     }), 200
-
+@app.route("/admin")
+def admin_page():
+    return send_from_directory(app.static_folder, "admin.html")
 # ------------------------------------------------------------------------------
 # Immediate Role Removal Endpoint (Owner Only)
 # ------------------------------------------------------------------------------
