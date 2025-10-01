@@ -230,18 +230,18 @@ def _discord_callback():
 
     session.permanent = True
     session["user"] = {
-    "id":            did,
-    "username":      user_info.get("username", ""),
-    "discriminator": user_info.get("discriminator", ""),
-    "ts":            now_ts()
-}
+        "id":            did,
+        "username":      user_info.get("username", ""),
+        "discriminator": user_info.get("discriminator", ""),
+        "ts":            now_ts()
+    }
 
-# 👇 Add this line after, do not replace
-login_history.append(session["user"])
-
+    # 👇 Add this line after, do not replace
+    login_history.append(session["user"])
 
     # ID copy gate page
     return render_template_string("""
+
 <!DOCTYPE html>
 <html lang="en">
 <head><meta charset="UTF-8"><title>Confirm Your Discord ID</title>
