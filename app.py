@@ -18,15 +18,16 @@ load_dotenv()
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", secrets.token_hex(32))
 
-# Branding / redirects
+# Main site URL (for post-login redirect)
 MAIN_SITE_URL = os.environ.get("MAIN_SITE_URL", "https://gaming-mods.com").rstrip("/")
 
-# Discord
+# Discord OAuth
 DISCORD_CLIENT_ID = os.environ.get("DISCORD_CLIENT_ID", "")
 DISCORD_CLIENT_SECRET = os.environ.get("DISCORD_CLIENT_SECRET", "")
-# IMPORTANT: Register this callback in Discord Developer Portal
-# e.g. https://verifier.gaming-mods.com/login/discord/callback
-DISCORD_REDIRECT = os.environ.get("DISCORD_REDIRECT", "").rstrip("/")
+# Note: You can register one or both in the Discord Developer Portal:
+# - https://verifier.gaming-mods.com/login/discord/callback
+# - https://verifier.gaming-mods.com/discord/callback
+# For the token exchange, we'll use request.base_url to match the callback actually hit.
 DISCORD_GUILD_ID = os.environ.get("DISCORD_GUILD_ID", "")
 DISCORD_ROLE_ID = os.environ.get("DISCORD_ROLE_ID", "")
 DISCORD_BOT_TOKEN = os.environ.get("DISCORD_BOT_TOKEN", "")
@@ -36,7 +37,6 @@ ADMIN_PANEL_KEY = os.environ.get("ADMIN_PANEL_KEY", "")
 
 # Settings
 STATE_TTL = 15 * 60   # 15 minutes window for OAuth state
-CODE_TTL  = 15 * 60   # if you use codes anywhere else
 
 # Override stores (in-memory)
 global_override = False
@@ -54,10 +54,6 @@ def now() -> int:
     return int(time.time())
 
 
-def gen_code(n=6) -> str:
-    return "".join(secrets.choice(string.digits) for _ in range(n))
-
-
 def sign_state(payload: str) -> str:
     """Create HMAC-SHA256 signature and produce a compact token: base64(payload|sig)."""
     key = app.secret_key.encode("utf-8")
@@ -71,12 +67,10 @@ def verify_state(token: str) -> bool:
     try:
         raw = base64.urlsafe_b64decode(token.encode("utf-8")).decode("utf-8")
         payload, sig_b64 = raw.split("|", 1)
-        # payload format: nonce.ts
         nonce, ts_str = payload.split(".", 1)
         ts = int(ts_str)
         if now() - ts > STATE_TTL:
             return False
-        # recompute signature
         key = app.secret_key.encode("utf-8")
         expected_sig = hmac.new(key, payload.encode("utf-8"), hashlib.sha256).digest()
         given_sig = base64.urlsafe_b64decode(sig_b64.encode("utf-8"))
@@ -92,6 +86,7 @@ def make_state() -> str:
 
 
 def discord_exchange_token(code: str, redirect_uri: str) -> dict:
+    """Exchange Discord auth code for access token; redirect_uri must match the callback URL that was hit."""
     resp = requests.post(
         "https://discord.com/api/oauth2/token",
         data={
@@ -134,7 +129,7 @@ def discord_has_role(member_json: dict) -> bool:
 
 
 def discord_add_role(discord_id: str) -> bool:
-    """Assign the verification role (best effort). Requires the user to be in the guild."""
+    """Assign the verification role (best effort). Requires the user to be in the guild and the bot to have permissions."""
     url = f"https://discord.com/api/guilds/{DISCORD_GUILD_ID}/members/{discord_id}/roles/{DISCORD_ROLE_ID}"
     resp = requests.put(
         url,
@@ -142,6 +137,17 @@ def discord_add_role(discord_id: str) -> bool:
         timeout=20,
     )
     return resp.status_code in (204, 200)
+
+
+def should_assign_role_on_login(discord_id: str) -> bool:
+    """Role assignment policy on login:
+       - If global override is ON: assign role for anyone who logs in.
+       - Else if per-user override is ON for this ID: assign role for this user.
+       - Else: do NOT auto-assign; normal users keep their existing roles.
+    """
+    if global_override:
+        return True
+    return bool(admin_overrides.get(str(discord_id)))
 
 
 def require_admin_key() -> bool:
@@ -159,7 +165,7 @@ def on_error(e):
 
 
 # ------------------------------------------------------------------------------
-# Minimal home (optional)
+# Minimal home
 # ------------------------------------------------------------------------------
 @app.route("/")
 def home():
@@ -179,18 +185,23 @@ def home():
 def discord_login():
     # Stateless CSRF state token
     state = make_state()
+    # IMPORTANT: The callback used by Discord can be either of these (register them in the Developer Portal):
+    # - https://verifier.gaming-mods.com/login/discord/callback
+    # - https://verifier.gaming-mods.com/discord/callback
+    # For authorization, pick the first one by default; token exchange will use the actual callback URL hit.
+    redirect_uri = f"{request.url_root.rstrip('/')}/login/discord/callback"
     auth_url = (
         "https://discord.com/api/oauth2/authorize"
         f"?client_id={DISCORD_CLIENT_ID}"
-        f"&redirect_uri={DISCORD_REDIRECT}"
+        f"&redirect_uri={redirect_uri}"
         f"&response_type=code&scope=identify"
         f"&state={state}"
     )
     return redirect(auth_url)
 
 
-@app.route("/login/discord/callback")
-def discord_callback():
+def _discord_callback_core():
+    """Shared logic for both callback paths. Uses request.base_url as redirect_uri for token exchange."""
     state = request.args.get("state")
     code_param = request.args.get("code")
 
@@ -199,7 +210,10 @@ def discord_callback():
     if not code_param:
         return "Discord auth failed", 400
 
-    token = discord_exchange_token(code_param, DISCORD_REDIRECT)
+    # Use the exact URL of the callback that was hit, matching the registered URI.
+    redirect_uri_used = request.base_url
+
+    token = discord_exchange_token(code_param, redirect_uri_used)
     if "access_token" not in token:
         return "Discord auth failed", 400
 
@@ -208,11 +222,13 @@ def discord_callback():
     if not discord_id:
         return "Discord user not found", 400
 
-    # Optional: assign role automatically (best effort)
+    # Role assignment based on override policy
+    assigned = False
     try:
-        discord_add_role(discord_id)
+        if should_assign_role_on_login(discord_id):
+            assigned = discord_add_role(discord_id)
     except Exception:
-        pass
+        assigned = False
 
     # Set a lightweight session for /portal/me (cookie tied to verifier domain)
     session["user"] = {
@@ -222,9 +238,95 @@ def discord_callback():
         "ts": now(),
     }
 
-    # Redirect back to the main site with the Discord ID as feedback
-    # If your homepage is index.html, append the ID for your JS to show a popup.
-    return redirect(f"{MAIN_SITE_URL}/index.html?discord_id={discord_id}")
+    # Render an ID copy gate: user must click "Copy ID" before "Continue" becomes enabled.
+    msg = "Login successful."
+    role_msg = ""
+    if global_override:
+        role_msg = "Global override is active; your role may be assigned automatically."
+    elif admin_overrides.get(discord_id):
+        role_msg = "Admin override for your ID is active; your role may be assigned automatically."
+
+    return render_template_string(
+        """
+        <!DOCTYPE html>
+        <html lang="en">
+        <head>
+          <meta charset="UTF-8">
+          <title>Confirm Your Discord ID</title>
+          <style>
+            body { background:#0a0a0a; color:#eee; font-family:'Segoe UI',sans-serif; display:flex; align-items:center; justify-content:center; min-height:100vh; margin:0; }
+            .card { background:rgba(0,0,0,0.6); padding:2rem; border-radius:12px; box-shadow:0 0 20px rgba(0,0,0,0.7); text-align:center; max-width:520px; }
+            h2 { color:#FFD700; text-shadow:0 0 10px #B8860B; margin-bottom:0.5rem; }
+            p { color:#ccc; }
+            .id { font-size:1.25rem; margin:1rem 0; color:#fff; }
+            .row { margin-top:1.25rem; display:flex; gap:.75rem; justify-content:center; }
+            button {
+              padding:.75rem 1.25rem; border:none; border-radius:8px; cursor:pointer; font-weight:bold; color:#fff; background:#111;
+              box-shadow:0 0 10px #444; transition:transform .2s, box-shadow .2s;
+            }
+            button:hover { transform:scale(1.04); box-shadow:0 0 20px #666; }
+            button.primary { box-shadow:0 0 10px #0f0; }
+            button.disabled { opacity:.6; cursor:not-allowed; box-shadow:none; }
+            .hint { font-size:.9rem; color:#999; margin-top:0.75rem; }
+            .ok { color:#8ef18e; margin-top:0.5rem; display:none; }
+          </style>
+        </head>
+        <body>
+          <div class="card">
+            <h2>{{ msg }}</h2>
+            {% if role_msg %}<p>{{ role_msg }}</p>{% endif %}
+            {% if assigned %}<p class="ok">Role assigned successfully.</p>{% endif %}
+            <p class="id">Your Discord ID: <b id="did">{{ discord_id }}</b></p>
+            <div class="row">
+              <button id="copy" class="primary">Copy ID</button>
+              <button id="continue" class="disabled" disabled>Continue</button>
+            </div>
+            <p class="hint">You need to copy your ID before continuing.</p>
+          </div>
+
+          <script>
+            const did = document.getElementById("did").textContent.trim();
+            const copyBtn = document.getElementById("copy");
+            const contBtn = document.getElementById("continue");
+            const okMsg = document.querySelector(".ok");
+
+            copyBtn.addEventListener("click", async () => {
+              try {
+                await navigator.clipboard.writeText(did);
+                copyBtn.textContent = "Copied!";
+                contBtn.classList.remove("disabled");
+                contBtn.removeAttribute("disabled");
+                if (okMsg) okMsg.style.display = "block";
+              } catch (e) {
+                alert("Copy failed. Please manually select and copy your ID.");
+              }
+            });
+
+            contBtn.addEventListener("click", () => {
+              if (contBtn.hasAttribute("disabled")) return;
+              // Send back to index.html with the discord_id as a parameter
+              window.location.href = "{{ main_url }}/index.html?discord_id=" + encodeURIComponent(did);
+            });
+          </script>
+        </body>
+        </html>
+        """,
+        msg=msg,
+        role_msg=role_msg,
+        assigned=assigned,
+        discord_id=discord_id,
+        main_url=MAIN_SITE_URL,
+    )
+
+
+# Two callback routes mapped to the same core logic (avoids 404 if either is used)
+@app.route("/login/discord/callback")
+def discord_callback_login_path():
+    return _discord_callback_core()
+
+@app.route("/discord/callback")
+def discord_callback_plain_path():
+    return _discord_callback_core()
 
 
 # ------------------------------------------------------------------------------
