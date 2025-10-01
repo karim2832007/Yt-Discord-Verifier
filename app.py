@@ -29,7 +29,7 @@ app.permanent_session_lifetime = timedelta(days=1)
 app.config.update(
     SESSION_COOKIE_DOMAIN=".gaming-mods.com",
     SESSION_COOKIE_SECURE=True,
-    SESSION_COOKIE_SAMESITE="Lax",
+    SESSION_COOKIE_SAMESITE="None",
 )
 
 # ------------------------------------------------------------------------------
