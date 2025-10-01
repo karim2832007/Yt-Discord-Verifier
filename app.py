@@ -52,6 +52,7 @@ OWNER_ID = "1329817290052734980"  # your Discord ID
 # ------------------------------------------------------------------------------
 global_override = False
 admin_overrides = {}
+login_history = []
 
 # ------------------------------------------------------------------------------
 # CSRF‐state TTL and logging
@@ -180,6 +181,13 @@ def serve_admin():
         return "Forbidden", 403
     return send_from_directory("https://gaming-mods.com/admin.html")
 
+@app.route("/admin/logins")
+def admin_logins():
+    if not require_owner():
+        return jsonify({"ok": False, "message": "Forbidden"}), 403
+    return jsonify({"ok": True, "logins": login_history}), 200
+
+
 # ------------------------------------------------------------------------------
 # Discord OAuth Flow
 # ------------------------------------------------------------------------------
@@ -222,11 +230,15 @@ def _discord_callback():
 
     session.permanent = True
     session["user"] = {
-        "id":            did,
-        "username":      user_info.get("username", ""),
-        "discriminator": user_info.get("discriminator", ""),
-        "ts":            now_ts()
-    }
+    "id":            did,
+    "username":      user_info.get("username", ""),
+    "discriminator": user_info.get("discriminator", ""),
+    "ts":            now_ts()
+}
+
+# 👇 Add this line after, do not replace
+login_history.append(session["user"])
+
 
     # ID copy gate page
     return render_template_string("""
