@@ -389,10 +389,13 @@ def remove_role_now(did):
     success = discord_remove_role(did)
     status_code = 200 if success else 500
     return jsonify({"ok": success, "discord_id": did}), status_code
-    @app.route("/remove_role_all", methods=["POST"])
+    
+@app.route("/remove_role_all", methods=["POST"])
 def remove_role_all():
     if not require_owner():
         return jsonify({"ok": False, "message": "Forbidden"}), 403
+    ...
+
 
     url = f"https://discord.com/api/guilds/{DISCORD_GUILD_ID}/members?limit=1000"
     headers = {"Authorization": f"Bot {DISCORD_BOT_TOKEN}"}
