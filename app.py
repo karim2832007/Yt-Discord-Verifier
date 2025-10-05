@@ -1,7 +1,10 @@
 # app.py
-# Full, ready-to-deploy Flask app for the verifier used in the project you provided.
-# Copy this file into your project root (replacing current app.py), install requirements,
-# set environment variables, and deploy.
+# Full, ready-to-deploy Flask app (complete). Paste into your project root, set env vars, install requirements, and deploy.
+# Key fixes included:
+# - discord_exchange_token uses retries, respects Retry-After, returns structured errors
+# - callback render lives inside route function (no 'return' outside function)
+# - robust session endpoint and Owner checks
+# - CORS configured for front-end origin with credentials support
 
 import os
 import time
@@ -29,7 +32,7 @@ app.permanent_session_lifetime = timedelta(days=1)
 
 # Cookie config so verifier can set cookies for .gaming-mods.com if deployed there
 app.config.update(
-    SESSION_COOKIE_DOMAIN=".gaming-mods.com",
+    SESSION_COOKIE_DOMAIN=os.environ.get("SESSION_COOKIE_DOMAIN", ".gaming-mods.com"),
     SESSION_COOKIE_SECURE=True,
     SESSION_COOKIE_SAMESITE="None",
 )
@@ -45,9 +48,9 @@ DISCORD_CLIENT_SECRET = os.environ.get("DISCORD_CLIENT_SECRET", "")
 DISCORD_GUILD_ID = os.environ.get("DISCORD_GUILD_ID", "")
 DISCORD_ROLE_ID = os.environ.get("DISCORD_ROLE_ID", "")
 DISCORD_BOT_TOKEN = os.environ.get("DISCORD_BOT_TOKEN", "")
-OWNER_ID = os.environ.get("OWNER_ID", "1329817290052734980")  # safe default
+OWNER_ID = os.environ.get("OWNER_ID", "1329817290052734980")  # change as needed
 
-DISCORD_REDIRECT = os.environ.get("DISCORD_REDIRECT", "").strip()  # must match Discord app
+DISCORD_REDIRECT = os.environ.get("DISCORD_REDIRECT", "").strip()  # must match Discord app redirect
 IONOS_INDEX = f"{IONOS_BASE}/index.html"
 IONOS_ADMIN = f"{IONOS_BASE}/admin.html"
 IONOS_GAMES = f"{IONOS_BASE}/games.html"
@@ -135,7 +138,17 @@ def require_owner() -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Discord API helpers
+# Utility for safe JSON parsing (for logs)
+# ---------------------------------------------------------------------------
+def _safe_json(resp):
+    try:
+        return resp.json()
+    except Exception:
+        return {}
+
+
+# ---------------------------------------------------------------------------
+# Discord API helpers (token exchange with retries)
 # ---------------------------------------------------------------------------
 DEFAULT_HEADERS = {
     "Content-Type": "application/x-www-form-urlencoded",
@@ -144,39 +157,67 @@ DEFAULT_HEADERS = {
 
 
 def discord_exchange_token(code: str, redirect_uri: str) -> dict:
-    resp = requests.post(
-        "https://discord.com/api/oauth2/token",
-        data={
-            "client_id": DISCORD_CLIENT_ID,
-            "client_secret": DISCORD_CLIENT_SECRET,
-            "grant_type": "authorization_code",
-            "code": code,
-            "redirect_uri": redirect_uri,
-        },
-        headers=DEFAULT_HEADERS,
-        timeout=15
-    )
-    if resp.status_code == 429:
-        time.sleep(1.5)
-        resp = requests.post(
-            "https://discord.com/api/oauth2/token",
-            data={
-                "client_id": DISCORD_CLIENT_ID,
-                "client_secret": DISCORD_CLIENT_SECRET,
-                "grant_type": "authorization_code",
-                "code": code,
-                "redirect_uri": redirect_uri,
-            },
-            headers=DEFAULT_HEADERS,
-            timeout=15
-        )
-    try:
-        data = resp.json()
-    except Exception:
-        data = {}
-    if resp.status_code != 200:
-        return {"error": "token_exchange_failed", "status": resp.status_code, "body": resp.text or "", "json": data}
-    return data
+    """
+    Exchange OAuth code for tokens with retries and backoff.
+    Returns dict on success (contains access_token) or structured error dict on failure.
+    """
+    url = "https://discord.com/api/oauth2/token"
+    data = {
+        "client_id": DISCORD_CLIENT_ID,
+        "client_secret": DISCORD_CLIENT_SECRET,
+        "grant_type": "authorization_code",
+        "code": code,
+        "redirect_uri": redirect_uri,
+    }
+    headers = {
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Accept": "application/json",
+        "User-Agent": "GamingMods-Verifier/1.0 (+https://gaming-mods.com)"
+    }
+
+    max_attempts = 5
+    backoff_base = 0.5  # seconds
+    for attempt in range(1, max_attempts + 1):
+        try:
+            resp = requests.post(url, data=data, headers=headers, timeout=15)
+        except requests.RequestException as exc:
+            logging.warning("discord_exchange_token network error (attempt %d): %s", attempt, exc)
+            if attempt == max_attempts:
+                return {"error": "network_error", "message": str(exc)}
+            time.sleep(backoff_base * (2 ** (attempt - 1)))
+            continue
+
+        if resp.status_code == 429:
+            retry_after = None
+            try:
+                retry_after = int(resp.headers.get("Retry-After") or resp.headers.get("retry-after") or 0)
+            except Exception:
+                retry_after = None
+            logging.warning("discord_exchange_token received 429 (attempt %d). Retry-After: %s", attempt, retry_after)
+            if attempt == max_attempts:
+                return {"error": "token_exchange_failed", "status": 429, "body": resp.text, "json": _safe_json(resp)}
+            sleep_for = retry_after if retry_after and retry_after > 0 else (backoff_base * (2 ** (attempt - 1)))
+            time.sleep(sleep_for)
+            continue
+
+        if resp.status_code >= 500 and resp.status_code < 600:
+            logging.warning("discord_exchange_token server error %s (attempt %d)", resp.status_code, attempt)
+            if attempt == max_attempts:
+                return {"error": "token_exchange_failed", "status": resp.status_code, "body": resp.text, "json": _safe_json(resp)}
+            time.sleep(backoff_base * (2 ** (attempt - 1)))
+            continue
+
+        try:
+            payload = resp.json()
+        except Exception:
+            payload = {}
+        if resp.status_code != 200:
+            logging.warning("discord_exchange_token bad status %s: %s", resp.status_code, resp.text)
+            return {"error": "token_exchange_failed", "status": resp.status_code, "body": resp.text, "json": payload}
+
+        return payload
+
+    return {"error": "token_exchange_failed", "status": "max_retries_exceeded"}
 
 
 def discord_get_user(token: str) -> dict:
@@ -190,15 +231,20 @@ def discord_get_user(token: str) -> dict:
     except Exception:
         data = {}
     if resp.status_code != 200:
-        return {"error": "user_fetch_failed", "status": resp.status_code, "body": resp.text or "", "json": data}
+        return {"error": "user_fetch_failed", "status": resp.status_code, "body": resp.text, "json": data}
     return data
 
 
 def discord_member(did: str) -> dict:
+    if not DISCORD_GUILD_ID or not DISCORD_BOT_TOKEN:
+        return {"status_code": 400, "error": "missing_guild_or_bot_token"}
     url = f"https://discord.com/api/guilds/{DISCORD_GUILD_ID}/members/{did}"
     resp = requests.get(url, headers={"Authorization": f"Bot {DISCORD_BOT_TOKEN}"}, timeout=15)
     if resp.status_code == 200:
-        return resp.json()
+        try:
+            return resp.json()
+        except Exception:
+            return {"status_code": resp.status_code, "error": resp.text}
     return {"status_code": resp.status_code, "error": resp.text}
 
 
@@ -207,19 +253,23 @@ def discord_has_role(member: dict) -> bool:
 
 
 def discord_add_role(did: str) -> bool:
+    if not DISCORD_GUILD_ID or not DISCORD_BOT_TOKEN or not DISCORD_ROLE_ID:
+        return False
     url = f"https://discord.com/api/guilds/{DISCORD_GUILD_ID}/members/{did}/roles/{DISCORD_ROLE_ID}"
     resp = requests.put(url, headers={"Authorization": f"Bot {DISCORD_BOT_TOKEN}"}, timeout=15)
     return resp.status_code in (200, 204)
 
 
 def discord_remove_role(did: str) -> bool:
+    if not DISCORD_GUILD_ID or not DISCORD_BOT_TOKEN or not DISCORD_ROLE_ID:
+        return False
     url = f"https://discord.com/api/guilds/{DISCORD_GUILD_ID}/members/{did}/roles/{DISCORD_ROLE_ID}"
     resp = requests.delete(url, headers={"Authorization": f"Bot {DISCORD_BOT_TOKEN}"}, timeout=15)
     return resp.status_code in (200, 204)
 
 
 def should_assign_on_login(did: str) -> bool:
-    return global_override or admin_overrides.get(did, False)
+    return global_override or bool(admin_overrides.get(did, False))
 
 
 # ---------------------------------------------------------------------------
@@ -232,7 +282,7 @@ def handle_exception(e):
 
 
 # ---------------------------------------------------------------------------
-# Front-end redirect routes (we don't serve static index here)
+# Front-end redirect routes
 # ---------------------------------------------------------------------------
 @app.route("/")
 def serve_index():
@@ -274,7 +324,6 @@ def admin_logins():
 @app.route("/login/discord")
 def login_discord():
     state = make_state()
-    # Use configured DISCORD_REDIRECT or fallback to a route on this app
     redirect_uri = DISCORD_REDIRECT or f"{request.url_root.rstrip('/')}/login/discord/callback"
     auth_url = (
         "https://discord.com/api/oauth2/authorize"
@@ -297,6 +346,8 @@ def _discord_callback():
     redirect_uri = DISCORD_REDIRECT or request.base_url
     token_resp = discord_exchange_token(code, redirect_uri)
     if "access_token" not in token_resp:
+        # return structured error to client (also logs)
+        logging.warning("Token exchange failed: %s", token_resp)
         return jsonify({"ok": False, "message": "Token exchange failed", "details": token_resp}), 400
 
     user_info = discord_get_user(token_resp["access_token"])
@@ -420,20 +471,20 @@ def status(did):
         return jsonify({
             "ok": True,
             "role_granted": True,
-            "message": "🌍 GLOBAL OVERRIDE ACTIVE — All players have been granted access by the Admin Council!"
+            "message": "🌍 GLOBAL OVERRIDE ACTIVE — All players have been granted access!"
         }), 200
     if admin_overrides.get(did):
         return jsonify({
             "ok": True,
             "role_granted": True,
-            "message": "👑 ADMIN OVERRIDE — Your account has been hand-picked and empowered with access!"
+            "message": "👑 ADMIN OVERRIDE — Your account has been empowered!"
         }), 200
     member = discord_member(did)
     if "roles" in member:
         has = discord_has_role(member)
-        msg = "✨ Subscriber role verified — welcome, honored supporter!" if has else "❌ Subscriber role not found — verify your subscription."
+        msg = "✨ Subscriber role verified — welcome!" if has else "❌ Subscriber role not found — verify subscription."
         return jsonify({"ok": True, "role_granted": has, "message": msg}), 200
-    return jsonify({"ok": False, "role_granted": False, "message": f"⚠️ Member error (status {member.get('status_code')})"}), 404
+    return jsonify({"ok": False, "role_granted": False, "message": f"Member lookup error (status {member.get('status_code')})"}), 404
 
 
 @app.route("/health")
@@ -505,11 +556,13 @@ def remove_role_now(did):
 def remove_role_all():
     if not require_owner():
         return jsonify({"ok": False, "message": "Forbidden"}), 403
+    if not DISCORD_GUILD_ID or not DISCORD_BOT_TOKEN:
+        return jsonify({"ok": False, "message": "Missing guild or bot token"}), 400
     url = f"https://discord.com/api/guilds/{DISCORD_GUILD_ID}/members?limit=1000"
     headers = {"Authorization": f"Bot {DISCORD_BOT_TOKEN}"}
     resp = requests.get(url, headers=headers, timeout=15)
     if resp.status_code != 200:
-        return jsonify({"ok": False, "message": "Failed to fetch members"}), 500
+        return jsonify({"ok": False, "message": "Failed to fetch members", "status": resp.status_code}), 500
     members = resp.json()
     removed, failed = [], []
     for m in members:
