@@ -20,8 +20,8 @@ import json
 load_dotenv()
 app = Flask(
     __name__,
-    static_folder="static",           # serves index.html & admin.html
-    static_url_path=""                # root (/) serves index.html
+    static_folder=".",        # serve front-end files from project root
+    static_url_path=""        # root (/) serves index.html
 )
 app.secret_key = os.environ.get("SECRET_KEY", secrets.token_hex(32))
 app.permanent_session_lifetime = timedelta(days=1)
@@ -31,7 +31,7 @@ app.config.update(
     SESSION_COOKIE_SAMESITE="None",
 )
 
-# ✅ Apply CORS after app is created
+# Apply CORS after app is created
 CORS(app, origins=["https://gaming-mods.com"], supports_credentials=True)
 
 # ------------------------------------------------------------------------------
@@ -43,6 +43,9 @@ DISCORD_GUILD_ID = os.environ["DISCORD_GUILD_ID"]
 DISCORD_ROLE_ID = os.environ["DISCORD_ROLE_ID"]
 DISCORD_BOT_TOKEN = os.environ["DISCORD_BOT_TOKEN"]
 OWNER_ID = "1329817290052734980"  # your Discord ID
+
+# Optional: If you want to enforce one redirect URI everywhere, set this in .env
+DISCORD_REDIRECT = os.environ.get("DISCORD_REDIRECT", "").strip()
 
 # ------------------------------------------------------------------------------
 # In-memory override state
@@ -243,17 +246,31 @@ def handle_exception(e):
     return jsonify({"ok": False, "error": str(e)}), 500
 
 # ------------------------------------------------------------------------------
-# Serve Static Front‑end
+# Serve root-level static files (option 2)
 # ------------------------------------------------------------------------------
 @app.route("/")
 def serve_index():
-    return send_from_directory("static", "index.html")
+    # index.html should be at project root (e.g., /htdocs/index.html in your deploy)
+    return send_from_directory(".", "index.html")
 
 @app.route("/admin")
 def serve_admin():
     if not require_owner():
         return "Forbidden", 403
-    return send_from_directory("static", "admin.html")
+    return send_from_directory(".", "admin.html")
+
+# Optional static pages if you want direct routes
+@app.route("/games")
+def serve_games():
+    return send_from_directory(".", "games.html")
+
+@app.route("/privacy")
+def serve_privacy():
+    return send_from_directory(".", "privacy.html")
+
+@app.route("/donate")
+def serve_donate():
+    return send_from_directory(".", "donate.html")
 
 @app.route("/admin/logins")
 def admin_logins():
@@ -262,12 +279,13 @@ def admin_logins():
     return jsonify({"ok": True, "logins": login_history}), 200
 
 # ------------------------------------------------------------------------------
-# Discord OAuth Flow
+# Discord OAuth flow
 # ------------------------------------------------------------------------------
 @app.route("/login/discord")
 def login_discord():
     state = make_state()
-    redirect_uri = f"{request.url_root.rstrip('/')}/login/discord/callback"
+    # Build redirect_uri: prefer DISCORD_REDIRECT from env if provided; else derive from request
+    redirect_uri = DISCORD_REDIRECT or f"{request.url_root.rstrip('/')}/login/discord/callback"
     auth_url = (
         "https://discord.com/api/oauth2/authorize"
         f"?client_id={DISCORD_CLIENT_ID}"
@@ -285,9 +303,11 @@ def _discord_callback():
     if not code:
         return "Missing code", 400
 
-    # Logic preserved: use request.base_url for redirect_uri on token exchange
-    token_resp = discord_exchange_token(code, request.base_url)
+    # Use the same redirect_uri as in authorize: prefer env, else request.base_url
+    redirect_uri = DISCORD_REDIRECT or request.base_url
+    token_resp = discord_exchange_token(code, redirect_uri)
 
+    # If token exchange failed, surface details cleanly
     if "access_token" not in token_resp:
         return jsonify({"ok": False, "message": "Token exchange failed", "details": token_resp}), 400
 
@@ -296,6 +316,7 @@ def _discord_callback():
     if not did:
         return jsonify({"ok": False, "message": "Discord user lookup failed", "details": user_info}), 400
 
+    # Assign role on login if allowed
     try:
         if should_assign_on_login(did):
             discord_add_role(did)
@@ -311,6 +332,7 @@ def _discord_callback():
     }
     login_history.append(session["user"])
 
+    # ID copy gate page
     return render_template_string("""
 <!DOCTYPE html>
 <html lang="en">
@@ -520,7 +542,7 @@ def remove_role_all():
     }), 200
 
 # ------------------------------------------------------------------------------
-# Run development server
+# Run server
 # ------------------------------------------------------------------------------
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
