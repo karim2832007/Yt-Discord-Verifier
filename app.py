@@ -327,56 +327,74 @@ def _discord_callback():
     }
     login_history.append(session["user"])
 
-    # ID copy gate page (served by backend), then send to IONOS front end
-    return render_template_string("""
+# ID copy gate page (served by backend), then send to IONOS front end
+return render_template_string("""
 <!DOCTYPE html>
 <html lang="en">
-<head><meta charset="UTF-8"><title>Confirm Your Discord ID</title>
-<style>
-  body{background:#0a0a0a;color:#eee;font-family:'Segoe UI',sans-serif;
-       display:flex;align-items:center;justify-content:center;height:100vh;margin:0}
-  .card{background:rgba(0,0,0,0.6);padding:2rem;border-radius:12px;
-       box-shadow:0 0 20px rgba(0,0,0,0.7);text-align:center;max-width:500px}
-  h2{color:#FFD700;margin-bottom:.5rem}
-  p{color:#ccc}.id{font-size:1.2rem;margin:1rem 0;color:#fff}
-  .row{display:flex;gap:.75rem;justify-content:center;margin-top:1rem}
-  button{padding:.75rem 1.25rem;border:none;border-radius:8px;
-       cursor:pointer;font-weight:bold;color:#fff;background:#111;
-       box-shadow:0 0 10px #444;transition:transform .2s}
-  button:hover{transform:scale(1.04)}.primary{box-shadow:0 0 10px #0f0}
-  .disabled{opacity:.6;cursor:not-allowed}
-</style>
+<head>
+  <meta charset="UTF-8">
+  <title>Confirm Your Discord ID</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <style>
+    body{background:#0a0a0a;color:#eee;font-family:'Segoe UI',sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0}
+    .card{background:rgba(0,0,0,0.6);padding:2rem;border-radius:12px;box-shadow:0 0 20px rgba(0,0,0,0.7);text-align:center;max-width:520px}
+    h2{color:#FFD700;margin-bottom:.5rem}
+    p{color:#ccc}
+    .id{font-size:1.2rem;margin:1rem 0;color:#fff;word-break:break-all}
+    .row{display:flex;gap:.75rem;justify-content:center;margin-top:1rem}
+    button{padding:.75rem 1.25rem;border:none;border-radius:8px;cursor:pointer;font-weight:bold;color:#fff;background:#111;box-shadow:0 0 10px #444;transition:transform .12s}
+    button:hover{transform:scale(1.03)}
+    .primary{background:#2b2b2b}
+    .enabled{background:#1a73e8}
+    .disabled{opacity:.6;cursor:not-allowed}
+  </style>
 </head>
 <body>
   <div class="card">
     <h2>Login successful.</h2>
-    <p class="id">Your Discord ID: <b id="did">{{ did }}</b></p>
+    <p class="id">Your Discord ID: <strong id="did">{{ did }}</strong></p>
     <div class="row">
       <button id="copy" class="primary">Copy ID</button>
       <button id="continue" class="disabled" disabled>Continue</button>
     </div>
   </div>
-<script>
-  const did = document.getElementById('did').textContent.trim();
-  const copyBtn = document.getElementById('copy');
-  const contBtn = document.getElementById('continue');
-  copyBtn.addEventListener('click', async () => {
-    await navigator.clipboard.writeText(did);
-    copyBtn.textContent = 'Copied!';
-    contBtn.disabled = false;
-    contBtn.classList.remove('disabled');
-  });
-  contBtn.addEventListener('click', () => {
-    if (!contBtn.disabled) {
-      window.location.href = '{{ ionos_base }}' + ({{ has_index }} ? '/index.html' : '');
-      // Pass id as query param if your IONOS front end expects it:
-      // window.location.href = '{{ ionos_base }}' + '?discord_id=' + encodeURIComponent(did);
-    }
-  });
-</script>
+
+  <script>
+    const didEl = document.getElementById('did');
+    const copyBtn = document.getElementById('copy');
+    const contBtn = document.getElementById('continue');
+    const DID = didEl.textContent.trim();
+    const TARGET = "{{ ionos_index }}"; // exact index URL from server
+
+    copyBtn.addEventListener('click', async () => {
+      try {
+        await navigator.clipboard.writeText(DID);
+        copyBtn.textContent = 'Copied!';
+        contBtn.disabled = false;
+        contBtn.classList.remove('disabled');
+        contBtn.classList.add('enabled');
+      } catch (err) {
+        // fallback: select text for manual copy
+        const range = document.createRange();
+        range.selectNodeContents(didEl);
+        const sel = window.getSelection();
+        sel.removeAllRanges();
+        sel.addRange(range);
+        copyBtn.textContent = 'Select and press Ctrl+C';
+      }
+    });
+
+    contBtn.addEventListener('click', () => {
+      if (contBtn.disabled) return;
+      // Redirect explicitly to the configured index file and pass discord_id as query param.
+      // This ensures the front end can pick up the id if cookies/samesite cause issues.
+      const sep = TARGET.includes('?') ? '&' : '?';
+      window.location.href = TARGET + sep + 'discord_id=' + encodeURIComponent(DID);
+    });
+  </script>
 </body>
 </html>
-""", did=did, ionos_base=IONOS_BASE, has_index=(not IONOS_BASE.endswith("/")))
+""", did=did, ionos_index=IONOS_INDEX)
 
 @app.route("/login/discord/callback")
 def discord_callback_login():
