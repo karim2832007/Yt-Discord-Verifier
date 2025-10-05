@@ -8,7 +8,7 @@ import logging
 from datetime import timedelta
 import requests
 from flask import (
-    Flask, redirect, request, session, jsonify, send_from_directory, render_template_string
+    Flask, redirect, request, session, jsonify, render_template_string
 )
 from dotenv import load_dotenv
 from flask_cors import CORS
@@ -18,20 +18,15 @@ import json
 # Load environment and configure app
 # ------------------------------------------------------------------------------
 load_dotenv()
-app = Flask(
-    __name__,
-    static_folder=".",        # serve front-end files from project root
-    static_url_path=""        # root (/) serves index.html
-)
+app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", secrets.token_hex(32))
 app.permanent_session_lifetime = timedelta(days=1)
 app.config.update(
-    SESSION_COOKIE_DOMAIN=".gaming-mods.com",
+    SESSION_COOKIE_DOMAIN=".gaming-mods.com",  # allows cookies across verifier and main domain
     SESSION_COOKIE_SECURE=True,
     SESSION_COOKIE_SAMESITE="None",
 )
 
-# Apply CORS after app is created
 CORS(app, origins=["https://gaming-mods.com"], supports_credentials=True)
 
 # ------------------------------------------------------------------------------
@@ -44,8 +39,16 @@ DISCORD_ROLE_ID = os.environ["DISCORD_ROLE_ID"]
 DISCORD_BOT_TOKEN = os.environ["DISCORD_BOT_TOKEN"]
 OWNER_ID = "1329817290052734980"  # your Discord ID
 
-# Optional: If you want to enforce one redirect URI everywhere, set this in .env
+# Enforced redirect URI for OAuth (must match Discord portal)
 DISCORD_REDIRECT = os.environ.get("DISCORD_REDIRECT", "").strip()
+
+# IONOS front end URLs (use these for redirects)
+IONOS_BASE = os.environ.get("BASE_URL", "https://gaming-mods.com").rstrip("/")
+IONOS_INDEX = f"{IONOS_BASE}/index.html" if not IONOS_BASE.endswith("/") else IONOS_BASE
+IONOS_ADMIN = f"{IONOS_BASE}/admin.html"
+IONOS_GAMES = f"{IONOS_BASE}/games.html"
+IONOS_DONATE = f"{IONOS_BASE}/donate.html"
+IONOS_PRIVACY = f"{IONOS_BASE}/privacy.html"
 
 # ------------------------------------------------------------------------------
 # In-memory override state
@@ -74,7 +77,6 @@ def load_state():
         global_override = data.get("global_override", False)
         admin_overrides = data.get("admin_overrides", {})
 
-# Load persisted state at startup
 load_state()
 
 # ------------------------------------------------------------------------------
@@ -130,7 +132,6 @@ DEFAULT_HEADERS = {
 # Discord API helpers
 # ------------------------------------------------------------------------------
 def discord_exchange_token(code: str, redirect_uri: str) -> dict:
-    # First attempt
     resp = requests.post(
         "https://discord.com/api/oauth2/token",
         data={
@@ -143,8 +144,6 @@ def discord_exchange_token(code: str, redirect_uri: str) -> dict:
         headers=DEFAULT_HEADERS,
         timeout=15
     )
-
-    # Single short retry on HTTP 429 (rate limit), logic preserved otherwise
     if resp.status_code == 429:
         time.sleep(1.5)
         resp = requests.post(
@@ -159,8 +158,6 @@ def discord_exchange_token(code: str, redirect_uri: str) -> dict:
             headers=DEFAULT_HEADERS,
             timeout=15
         )
-
-    # Harden JSON parsing to avoid "Expecting value" on non-JSON bodies
     try:
         data = resp.json()
     except Exception:
@@ -246,31 +243,31 @@ def handle_exception(e):
     return jsonify({"ok": False, "error": str(e)}), 500
 
 # ------------------------------------------------------------------------------
-# Serve root-level static files (option 2)
+# Use IONOS front end via redirects (no local static serving)
 # ------------------------------------------------------------------------------
 @app.route("/")
 def serve_index():
-    # index.html should be at project root (e.g., /htdocs/index.html in your deploy)
-    return send_from_directory(".", "index.html")
+    # Always use the IONOS homepage
+    return redirect(IONOS_BASE)
 
 @app.route("/admin")
 def serve_admin():
+    # If you want to gate access, keep owner check; else remove
     if not require_owner():
         return "Forbidden", 403
-    return send_from_directory(".", "admin.html")
+    return redirect(IONOS_ADMIN)
 
-# Optional static pages if you want direct routes
 @app.route("/games")
 def serve_games():
-    return send_from_directory(".", "games.html")
+    return redirect(IONOS_GAMES)
 
 @app.route("/privacy")
 def serve_privacy():
-    return send_from_directory(".", "privacy.html")
+    return redirect(IONOS_PRIVACY)
 
 @app.route("/donate")
 def serve_donate():
-    return send_from_directory(".", "donate.html")
+    return redirect(IONOS_DONATE)
 
 @app.route("/admin/logins")
 def admin_logins():
@@ -284,7 +281,7 @@ def admin_logins():
 @app.route("/login/discord")
 def login_discord():
     state = make_state()
-    # Build redirect_uri: prefer DISCORD_REDIRECT from env if provided; else derive from request
+    # Always use the env var; fallback derived only if missing
     redirect_uri = DISCORD_REDIRECT or f"{request.url_root.rstrip('/')}/login/discord/callback"
     auth_url = (
         "https://discord.com/api/oauth2/authorize"
@@ -303,11 +300,10 @@ def _discord_callback():
     if not code:
         return "Missing code", 400
 
-    # Use the same redirect_uri as in authorize: prefer env, else request.base_url
+    # Use the same exact redirect URI string for token exchange
     redirect_uri = DISCORD_REDIRECT or request.base_url
     token_resp = discord_exchange_token(code, redirect_uri)
 
-    # If token exchange failed, surface details cleanly
     if "access_token" not in token_resp:
         return jsonify({"ok": False, "message": "Token exchange failed", "details": token_resp}), 400
 
@@ -316,7 +312,6 @@ def _discord_callback():
     if not did:
         return jsonify({"ok": False, "message": "Discord user lookup failed", "details": user_info}), 400
 
-    # Assign role on login if allowed
     try:
         if should_assign_on_login(did):
             discord_add_role(did)
@@ -332,7 +327,7 @@ def _discord_callback():
     }
     login_history.append(session["user"])
 
-    # ID copy gate page
+    # ID copy gate page (served by backend), then send to IONOS front end
     return render_template_string("""
 <!DOCTYPE html>
 <html lang="en">
@@ -373,13 +368,15 @@ def _discord_callback():
   });
   contBtn.addEventListener('click', () => {
     if (!contBtn.disabled) {
-      window.location.href = 'https://gaming-mods.com/?discord_id=' + encodeURIComponent(did);
+      window.location.href = '{{ ionos_base }}' + ({{ has_index }} ? '/index.html' : '');
+      // Pass id as query param if your IONOS front end expects it:
+      // window.location.href = '{{ ionos_base }}' + '?discord_id=' + encodeURIComponent(did);
     }
   });
 </script>
 </body>
 </html>
-""", did=did)
+""", did=did, ionos_base=IONOS_BASE, has_index=(not IONOS_BASE.endswith("/")))
 
 @app.route("/login/discord/callback")
 def discord_callback_login():
@@ -402,7 +399,7 @@ def portal_me():
 @app.route("/logout")
 def logout():
     session.clear()
-    return redirect("https://gaming-mods.com")
+    return redirect(IONOS_BASE)
 
 @app.route("/status/<did>")
 def status(did):
@@ -449,12 +446,12 @@ def override_all():
 
     if request.method == "POST":
         global_override = True
-        save_state()  # persist change
+        save_state()
         return jsonify({"ok": True, "global_override": True}), 200
 
     if request.method == "DELETE":
         global_override = False
-        save_state()  # persist change
+        save_state()
         return jsonify({"ok": True, "global_override": False}), 200
 
     return jsonify({"ok": False, "message": "Method not allowed"}), 405
@@ -473,12 +470,12 @@ def override_user(did):
 
     if request.method == "POST":
         admin_overrides[did] = {"username": "", "discriminator": ""}
-        save_state()  # persist change
+        save_state()
         return jsonify({"ok": True, "user_override": True, "discord_id": did}), 200
 
     if request.method == "DELETE":
         admin_overrides.pop(did, None)
-        save_state()  # persist change
+        save_state()
         return jsonify({"ok": True, "user_override": False, "discord_id": did}), 200
 
     return jsonify({"ok": False, "message": "Method not allowed"}), 405
