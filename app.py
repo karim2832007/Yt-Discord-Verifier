@@ -12,6 +12,7 @@ from flask import (
 )
 from dotenv import load_dotenv
 from flask_cors import CORS
+import json
 
 # ------------------------------------------------------------------------------
 # Load environment and configure app
@@ -53,7 +54,6 @@ login_history = []
 # ------------------------------------------------------------------------------
 # Persistent override state (JSON file)
 # ------------------------------------------------------------------------------
-import json, os
 STATE_FILE = "override_state.json"
 
 def save_state():
@@ -116,9 +116,18 @@ def require_owner() -> bool:
     return bool(user and user.get("id") == OWNER_ID)
 
 # ------------------------------------------------------------------------------
+# Shared headers for Discord requests
+# ------------------------------------------------------------------------------
+DEFAULT_HEADERS = {
+    "Content-Type": "application/x-www-form-urlencoded",
+    "User-Agent": "GamingMods-Verifier/1.0 (+https://gaming-mods.com)"
+}
+
+# ------------------------------------------------------------------------------
 # Discord API helpers
 # ------------------------------------------------------------------------------
 def discord_exchange_token(code: str, redirect_uri: str) -> dict:
+    # First attempt
     resp = requests.post(
         "https://discord.com/api/oauth2/token",
         data={
@@ -128,16 +137,32 @@ def discord_exchange_token(code: str, redirect_uri: str) -> dict:
             "code": code,
             "redirect_uri": redirect_uri,
         },
-        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        headers=DEFAULT_HEADERS,
         timeout=15
     )
+
+    # Single short retry on HTTP 429 (rate limit), logic preserved otherwise
+    if resp.status_code == 429:
+        time.sleep(1.5)
+        resp = requests.post(
+            "https://discord.com/api/oauth2/token",
+            data={
+                "client_id": DISCORD_CLIENT_ID,
+                "client_secret": DISCORD_CLIENT_SECRET,
+                "grant_type": "authorization_code",
+                "code": code,
+                "redirect_uri": redirect_uri,
+            },
+            headers=DEFAULT_HEADERS,
+            timeout=15
+        )
+
     # Harden JSON parsing to avoid "Expecting value" on non-JSON bodies
     try:
         data = resp.json()
     except Exception:
         data = {}
     if resp.status_code != 200:
-        # Surface raw body for debugging
         return {
             "error": "token_exchange_failed",
             "status": resp.status_code,
@@ -149,7 +174,10 @@ def discord_exchange_token(code: str, redirect_uri: str) -> dict:
 def discord_get_user(token: str) -> dict:
     resp = requests.get(
         "https://discord.com/api/users/@me",
-        headers={"Authorization": f"Bearer {token}"},
+        headers={
+            "Authorization": f"Bearer {token}",
+            "User-Agent": "GamingMods-Verifier/1.0 (+https://gaming-mods.com)"
+        },
         timeout=15
     )
     try:
@@ -225,7 +253,6 @@ def serve_index():
 def serve_admin():
     if not require_owner():
         return "Forbidden", 403
-    # Serve admin.html from the local static folder
     return send_from_directory("static", "admin.html")
 
 @app.route("/admin/logins")
@@ -258,22 +285,17 @@ def _discord_callback():
     if not code:
         return "Missing code", 400
 
-    # Keep using request.base_url as in your original logic
+    # Logic preserved: use request.base_url for redirect_uri on token exchange
     token_resp = discord_exchange_token(code, request.base_url)
 
-    # If token exchange failed, surface details to help debug (without crashing)
     if "access_token" not in token_resp:
-        logging.warning("Discord token exchange failed: %s", token_resp)
-        # Return a clear 400 with context so frontend or you can see the root cause
         return jsonify({"ok": False, "message": "Token exchange failed", "details": token_resp}), 400
 
     user_info = discord_get_user(token_resp["access_token"])
     did = str(user_info.get("id", "") or "")
     if not did:
-        logging.warning("Discord user lookup failed: %s", user_info)
         return jsonify({"ok": False, "message": "Discord user lookup failed", "details": user_info}), 400
 
-    # Assign role on login if allowed
     try:
         if should_assign_on_login(did):
             discord_add_role(did)
@@ -287,10 +309,8 @@ def _discord_callback():
         "discriminator": user_info.get("discriminator", ""),
         "ts": now_ts()
     }
-    # 👇 Add this line after, do not replace
     login_history.append(session["user"])
 
-    # ID copy gate page
     return render_template_string("""
 <!DOCTYPE html>
 <html lang="en">
@@ -430,7 +450,6 @@ def override_user(did):
         }), 200
 
     if request.method == "POST":
-        # You can store richer info here if you want (username, discriminator)
         admin_overrides[did] = {"username": "", "discriminator": ""}
         save_state()  # persist change
         return jsonify({"ok": True, "user_override": True, "discord_id": did}), 200
@@ -441,6 +460,23 @@ def override_user(did):
         return jsonify({"ok": True, "user_override": False, "discord_id": did}), 200
 
     return jsonify({"ok": False, "message": "Method not allowed"}), 405
+
+@app.route("/override", methods=["GET"])
+def list_overrides():
+    if not require_owner():
+        return jsonify({"ok": False, "message": "Forbidden"}), 403
+    users = []
+    for did, info in admin_overrides.items():
+        users.append({
+            "id": did,
+            "username": info.get("username", ""),
+            "discriminator": info.get("discriminator", "")
+        })
+    return jsonify({
+        "ok": True,
+        "global_override": global_override,
+        "users": users
+    }), 200
 
 # ------------------------------------------------------------------------------
 # Immediate Role Removal Endpoint (Owner Only)
