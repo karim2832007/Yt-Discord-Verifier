@@ -6,11 +6,9 @@ import hashlib
 import base64
 import logging
 from datetime import timedelta
-
 import requests
 from flask import (
-    Flask, redirect, request, session, jsonify,
-    send_from_directory, render_template_string
+    Flask, redirect, request, session, jsonify, send_from_directory, render_template_string
 )
 from dotenv import load_dotenv
 from flask_cors import CORS
@@ -19,11 +17,10 @@ from flask_cors import CORS
 # Load environment and configure app
 # ------------------------------------------------------------------------------
 load_dotenv()
-
 app = Flask(
     __name__,
-    static_folder="static",       # serves index.html & admin.html
-    static_url_path=""            # root (/) serves index.html
+    static_folder="static",           # serves index.html & admin.html
+    static_url_path=""                # root (/) serves index.html
 )
 app.secret_key = os.environ.get("SECRET_KEY", secrets.token_hex(32))
 app.permanent_session_lifetime = timedelta(days=1)
@@ -33,18 +30,17 @@ app.config.update(
     SESSION_COOKIE_SAMESITE="None",
 )
 
-# ✅ Apply CORS *after* app is created
+# ✅ Apply CORS after app is created
 CORS(app, origins=["https://gaming-mods.com"], supports_credentials=True)
 
 # ------------------------------------------------------------------------------
 # Discord & Owner settings
 # ------------------------------------------------------------------------------
-DISCORD_CLIENT_ID     = os.environ["DISCORD_CLIENT_ID"]
+DISCORD_CLIENT_ID = os.environ["DISCORD_CLIENT_ID"]
 DISCORD_CLIENT_SECRET = os.environ["DISCORD_CLIENT_SECRET"]
-DISCORD_GUILD_ID      = os.environ["DISCORD_GUILD_ID"]
-DISCORD_ROLE_ID       = os.environ["DISCORD_ROLE_ID"]
-DISCORD_BOT_TOKEN     = os.environ["DISCORD_BOT_TOKEN"]
-
+DISCORD_GUILD_ID = os.environ["DISCORD_GUILD_ID"]
+DISCORD_ROLE_ID = os.environ["DISCORD_ROLE_ID"]
+DISCORD_BOT_TOKEN = os.environ["DISCORD_BOT_TOKEN"]
 OWNER_ID = "1329817290052734980"  # your Discord ID
 
 # ------------------------------------------------------------------------------
@@ -54,11 +50,10 @@ global_override = False
 admin_overrides = {}
 login_history = []
 
-# ------------------------------------------------------------------------------  
-# Persistent override state (JSON file)  
-# ------------------------------------------------------------------------------  
+# ------------------------------------------------------------------------------
+# Persistent override state (JSON file)
+# ------------------------------------------------------------------------------
 import json, os
-
 STATE_FILE = "override_state.json"
 
 def save_state():
@@ -73,15 +68,14 @@ def load_state():
     if os.path.exists(STATE_FILE):
         with open(STATE_FILE) as f:
             data = json.load(f)
-            global_override = data.get("global_override", False)
-            admin_overrides = data.get("admin_overrides", {})
+        global_override = data.get("global_override", False)
+        admin_overrides = data.get("admin_overrides", {})
 
 # Load persisted state at startup
 load_state()
 
-
 # ------------------------------------------------------------------------------
-# CSRF‐state TTL and logging
+# CSRF–state TTL and logging
 # ------------------------------------------------------------------------------
 STATE_TTL = 15 * 60
 logging.basicConfig(level=logging.INFO)
@@ -101,14 +95,14 @@ def sign_state(payload: str) -> str:
 
 def verify_state(token: str) -> bool:
     try:
-        raw      = base64.urlsafe_b64decode(token).decode()
+        raw = base64.urlsafe_b64decode(token).decode()
         payload, sig_b64 = raw.split("|", 1)
         _, ts_str = payload.split(".", 1)
         if now_ts() - int(ts_str) > STATE_TTL:
             return False
-        key      = app.secret_key.encode()
+        key = app.secret_key.encode()
         expected = hmac.new(key, payload.encode(), hashlib.sha256).digest()
-        given    = base64.urlsafe_b64decode(sig_b64)
+        given = base64.urlsafe_b64decode(sig_b64)
         return hmac.compare_digest(expected, given)
     except Exception:
         return False
@@ -125,25 +119,51 @@ def require_owner() -> bool:
 # Discord API helpers
 # ------------------------------------------------------------------------------
 def discord_exchange_token(code: str, redirect_uri: str) -> dict:
-    return requests.post(
+    resp = requests.post(
         "https://discord.com/api/oauth2/token",
         data={
-            "client_id":     DISCORD_CLIENT_ID,
+            "client_id": DISCORD_CLIENT_ID,
             "client_secret": DISCORD_CLIENT_SECRET,
-            "grant_type":    "authorization_code",
-            "code":          code,
-            "redirect_uri":  redirect_uri,
+            "grant_type": "authorization_code",
+            "code": code,
+            "redirect_uri": redirect_uri,
         },
         headers={"Content-Type": "application/x-www-form-urlencoded"},
         timeout=15
-    ).json()
+    )
+    # Harden JSON parsing to avoid "Expecting value" on non-JSON bodies
+    try:
+        data = resp.json()
+    except Exception:
+        data = {}
+    if resp.status_code != 200:
+        # Surface raw body for debugging
+        return {
+            "error": "token_exchange_failed",
+            "status": resp.status_code,
+            "body": resp.text or "",
+            "json": data
+        }
+    return data
 
 def discord_get_user(token: str) -> dict:
-    return requests.get(
+    resp = requests.get(
         "https://discord.com/api/users/@me",
         headers={"Authorization": f"Bearer {token}"},
         timeout=15
-    ).json()
+    )
+    try:
+        data = resp.json()
+    except Exception:
+        data = {}
+    if resp.status_code != 200:
+        return {
+            "error": "user_fetch_failed",
+            "status": resp.status_code,
+            "body": resp.text or "",
+            "json": data
+        }
+    return data
 
 def discord_member(did: str) -> dict:
     url = f"https://discord.com/api/guilds/{DISCORD_GUILD_ID}/members/{did}"
@@ -195,7 +215,7 @@ def handle_exception(e):
     return jsonify({"ok": False, "error": str(e)}), 500
 
 # ------------------------------------------------------------------------------
-# Serve Static Front‐end
+# Serve Static Front‑end
 # ------------------------------------------------------------------------------
 @app.route("/")
 def serve_index():
@@ -208,14 +228,11 @@ def serve_admin():
     # Serve admin.html from the local static folder
     return send_from_directory("static", "admin.html")
 
-
 @app.route("/admin/logins")
 def admin_logins():
     if not require_owner():
         return jsonify({"ok": False, "message": "Forbidden"}), 403
     return jsonify({"ok": True, "logins": login_history}), 200
-
-
 
 # ------------------------------------------------------------------------------
 # Discord OAuth Flow
@@ -235,20 +252,26 @@ def login_discord():
 
 def _discord_callback():
     state = request.args.get("state", "")
-    code  = request.args.get("code", "")
+    code = request.args.get("code", "")
     if not state or not verify_state(state):
         return "Invalid or expired state", 400
     if not code:
         return "Missing code", 400
 
+    # Keep using request.base_url as in your original logic
     token_resp = discord_exchange_token(code, request.base_url)
+
+    # If token exchange failed, surface details to help debug (without crashing)
     if "access_token" not in token_resp:
-        return "Token exchange failed", 400
+        logging.warning("Discord token exchange failed: %s", token_resp)
+        # Return a clear 400 with context so frontend or you can see the root cause
+        return jsonify({"ok": False, "message": "Token exchange failed", "details": token_resp}), 400
 
     user_info = discord_get_user(token_resp["access_token"])
     did = str(user_info.get("id", "") or "")
     if not did:
-        return "Discord user lookup failed", 400
+        logging.warning("Discord user lookup failed: %s", user_info)
+        return jsonify({"ok": False, "message": "Discord user lookup failed", "details": user_info}), 400
 
     # Assign role on login if allowed
     try:
@@ -259,18 +282,16 @@ def _discord_callback():
 
     session.permanent = True
     session["user"] = {
-        "id":            did,
-        "username":      user_info.get("username", ""),
+        "id": did,
+        "username": user_info.get("username", ""),
         "discriminator": user_info.get("discriminator", ""),
-        "ts":            now_ts()
+        "ts": now_ts()
     }
-
     # 👇 Add this line after, do not replace
     login_history.append(session["user"])
 
     # ID copy gate page
     return render_template_string("""
-
 <!DOCTYPE html>
 <html lang="en">
 <head><meta charset="UTF-8"><title>Confirm Your Discord ID</title>
@@ -278,13 +299,13 @@ def _discord_callback():
   body{background:#0a0a0a;color:#eee;font-family:'Segoe UI',sans-serif;
        display:flex;align-items:center;justify-content:center;height:100vh;margin:0}
   .card{background:rgba(0,0,0,0.6);padding:2rem;border-radius:12px;
-        box-shadow:0 0 20px rgba(0,0,0,0.7);text-align:center;max-width:500px}
+       box-shadow:0 0 20px rgba(0,0,0,0.7);text-align:center;max-width:500px}
   h2{color:#FFD700;margin-bottom:.5rem}
   p{color:#ccc}.id{font-size:1.2rem;margin:1rem 0;color:#fff}
   .row{display:flex;gap:.75rem;justify-content:center;margin-top:1rem}
   button{padding:.75rem 1.25rem;border:none;border-radius:8px;
-         cursor:pointer;font-weight:bold;color:#fff;background:#111;
-         box-shadow:0 0 10px #444;transition:transform .2s}
+       cursor:pointer;font-weight:bold;color:#fff;background:#111;
+       box-shadow:0 0 10px #444;transition:transform .2s}
   button:hover{transform:scale(1.04)}.primary{box-shadow:0 0 10px #0f0}
   .disabled{opacity:.6;cursor:not-allowed}
 </style>
@@ -316,7 +337,7 @@ def _discord_callback():
 </script>
 </body>
 </html>
-    """, did=did)
+""", did=did)
 
 @app.route("/login/discord/callback")
 def discord_callback_login():
@@ -349,7 +370,6 @@ def status(did):
             "role_granted": True,
             "message": "🌍 GLOBAL OVERRIDE ACTIVE — All players have been granted access by the Admin Council!"
         }), 200
-
     if admin_overrides.get(did):
         return jsonify({
             "ok": True,
@@ -369,7 +389,6 @@ def status(did):
         "message": f"⚠️ Member error (status {member.get('status_code')})"
     }), 404
 
-
 @app.route("/health")
 def health():
     return jsonify({"ok": True, "ts": now_ts()}), 200
@@ -388,16 +407,15 @@ def override_all():
 
     if request.method == "POST":
         global_override = True
-        save_state()   # persist change
+        save_state()  # persist change
         return jsonify({"ok": True, "global_override": True}), 200
 
     if request.method == "DELETE":
         global_override = False
-        save_state()   # persist change
+        save_state()  # persist change
         return jsonify({"ok": True, "global_override": False}), 200
 
     return jsonify({"ok": False, "message": "Method not allowed"}), 405
-
 
 @app.route("/override/<did>", methods=["GET", "POST", "DELETE"])
 def override_user(did):
@@ -414,36 +432,15 @@ def override_user(did):
     if request.method == "POST":
         # You can store richer info here if you want (username, discriminator)
         admin_overrides[did] = {"username": "", "discriminator": ""}
-        save_state()   # persist change
+        save_state()  # persist change
         return jsonify({"ok": True, "user_override": True, "discord_id": did}), 200
 
     if request.method == "DELETE":
         admin_overrides.pop(did, None)
-        save_state()   # persist change
+        save_state()  # persist change
         return jsonify({"ok": True, "user_override": False, "discord_id": did}), 200
 
     return jsonify({"ok": False, "message": "Method not allowed"}), 405
-
-
-@app.route("/override", methods=["GET"])
-def list_overrides():
-    if not require_owner():
-        return jsonify({"ok": False, "message": "Forbidden"}), 403
-
-    users = []
-    for did, info in admin_overrides.items():
-        users.append({
-            "id": did,
-            "username": info.get("username", ""),
-            "discriminator": info.get("discriminator", "")
-        })
-
-    return jsonify({
-        "ok": True,
-        "global_override": global_override,
-        "users": users
-    }), 200
-
 
 # ------------------------------------------------------------------------------
 # Immediate Role Removal Endpoint (Owner Only)
@@ -455,24 +452,18 @@ def remove_role_now(did):
     success = discord_remove_role(did)
     status_code = 200 if success else 500
     return jsonify({"ok": success, "discord_id": did}), status_code
-    
+
 @app.route("/remove_role_all", methods=["POST"])
 def remove_role_all():
     if not require_owner():
         return jsonify({"ok": False, "message": "Forbidden"}), 403
-    ...
-
-
     url = f"https://discord.com/api/guilds/{DISCORD_GUILD_ID}/members?limit=1000"
     headers = {"Authorization": f"Bot {DISCORD_BOT_TOKEN}"}
     resp = requests.get(url, headers=headers, timeout=15)
-
     if resp.status_code != 200:
         return jsonify({"ok": False, "message": "Failed to fetch members"}), 500
-
     members = resp.json()
     removed, failed = [], []
-
     for m in members:
         did = str(m["user"]["id"])
         r = requests.delete(
@@ -484,7 +475,6 @@ def remove_role_all():
             removed.append(did)
         else:
             failed.append(did)
-
     return jsonify({
         "ok": True,
         "removed_count": len(removed),
@@ -492,7 +482,6 @@ def remove_role_all():
         "removed_sample": removed[:10],
         "failed_sample": failed[:10]
     }), 200
-
 
 # ------------------------------------------------------------------------------
 # Run development server
