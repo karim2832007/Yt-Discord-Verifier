@@ -1,4 +1,4 @@
-# app.py (part 1/2)
+# app.py
 import os
 import time
 import secrets
@@ -7,11 +7,11 @@ import hashlib
 import base64
 import logging
 from datetime import timedelta
+
 import requests
 from flask import Flask, redirect, request, session, jsonify, render_template_string
 from dotenv import load_dotenv
 from flask_cors import CORS
-import json
 
 # ---------------------------------------------------------------------------
 # Load environment and configure app
@@ -44,44 +44,13 @@ CORS(app, origins=[IONOS_BASE], supports_credentials=True)
 DISCORD_CLIENT_ID = os.environ.get("DISCORD_CLIENT_ID", "")
 DISCORD_CLIENT_SECRET = os.environ.get("DISCORD_CLIENT_SECRET", "")
 DISCORD_GUILD_ID = os.environ.get("DISCORD_GUILD_ID", "")
-DISCORD_ROLE_ID = os.environ.get("DISCORD_ROLE_ID", "")
+DISCORD_ROLE_ID = os.environ.get("DISCORD_ROLE_ID", "")  # if you still use role-gating anywhere
 DISCORD_BOT_TOKEN = os.environ.get("DISCORD_BOT_TOKEN", "")
 OWNER_ID = os.environ.get("OWNER_ID", "1329817290052734980")
 DISCORD_REDIRECT = os.environ.get("DISCORD_REDIRECT", "").strip()
 
-# ---------------------------------------------------------------------------
-# State persistence & overrides
-# ---------------------------------------------------------------------------
-global_override = False
-admin_overrides = {}
-login_history = []
-STATE_FILE = "override_state.json"
-
-
-def save_state():
-    try:
-        with open(STATE_FILE, "w") as f:
-            json.dump({
-                "global_override": global_override,
-                "admin_overrides": admin_overrides
-            }, f)
-    except Exception:
-        logging.exception("Failed to save state")
-
-
-def load_state():
-    global global_override, admin_overrides
-    try:
-        if os.path.exists(STATE_FILE):
-            with open(STATE_FILE) as f:
-                data = json.load(f)
-            global_override = data.get("global_override", False)
-            admin_overrides = data.get("admin_overrides", {})
-    except Exception:
-        logging.exception("Failed to load state")
-
-
-load_state()
+# Invite link for non-members
+DISCORD_INVITE = os.environ.get("DISCORD_INVITE", "https://discord.gg/RM64pBbbpE")
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -90,17 +59,14 @@ STATE_TTL = 15 * 60
 logging.basicConfig(level=logging.INFO)
 app.config["PROPAGATE_EXCEPTIONS"] = True
 
-
 def now_ts() -> int:
     return int(time.time())
-
 
 def sign_state(payload: str) -> str:
     key = app.secret_key.encode()
     sig = hmac.new(key, payload.encode(), hashlib.sha256).digest()
     token = f"{payload}|{base64.urlsafe_b64encode(sig).decode()}"
     return base64.urlsafe_b64encode(token.encode()).decode()
-
 
 def verify_state(token: str) -> bool:
     try:
@@ -116,32 +82,27 @@ def verify_state(token: str) -> bool:
     except Exception:
         return False
 
-
 def make_state() -> str:
     payload = f"{secrets.token_hex(8)}.{now_ts()}"
     return sign_state(payload)
 
-
 def require_owner() -> bool:
     user = session.get("user")
     return bool(user and str(user.get("id")) == str(OWNER_ID))
-
 
 def _safe_json(resp):
     try:
         return resp.json()
     except Exception:
         return {}
-# app.py (part 2/2-A)
+
 # ---------------------------------------------------------------------------
 # Discord API helpers
 # ---------------------------------------------------------------------------
+DISCORD_API_BASE = "https://discord.com/api"
+
 def discord_exchange_token(code: str, redirect_uri: str) -> dict:
-    """
-    Exchange OAuth code for tokens with safe, non-blocking behaviour for long Retry-After.
-    Returns payload on success (contains access_token) or structured error dict on failure.
-    """
-    url = "https://discord.com/api/oauth2/token"
+    url = f"{DISCORD_API_BASE}/oauth2/token"
     data = {
         "client_id": DISCORD_CLIENT_ID,
         "client_secret": DISCORD_CLIENT_SECRET,
@@ -212,12 +173,14 @@ def discord_exchange_token(code: str, redirect_uri: str) -> dict:
 
     return {"error": "token_exchange_failed", "status": "max_retries_exceeded"}
 
-
 def discord_get_user(token: str) -> dict:
     try:
         resp = requests.get(
-            "https://discord.com/api/users/@me",
-            headers={"Authorization": f"Bearer {token}", "User-Agent": "GamingMods-Verifier/1.0 (+https://gaming-mods.com)"},
+            f"{DISCORD_API_BASE}/users/@me",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "User-Agent": "GamingMods-Verifier/1.0 (+https://gaming-mods.com)"
+            },
             timeout=15
         )
     except Exception as e:
@@ -230,11 +193,10 @@ def discord_get_user(token: str) -> dict:
         return {"error": "user_fetch_failed", "status": resp.status_code, "body": resp.text, "json": data}
     return data
 
-
 def discord_member(did: str) -> dict:
     if not DISCORD_GUILD_ID or not DISCORD_BOT_TOKEN:
         return {"status_code": 400, "error": "missing_guild_or_bot_token"}
-    url = f"https://discord.com/api/guilds/{DISCORD_GUILD_ID}/members/{did}"
+    url = f"{DISCORD_API_BASE}/guilds/{DISCORD_GUILD_ID}/members/{did}"
     resp = requests.get(url, headers={"Authorization": f"Bot {DISCORD_BOT_TOKEN}"}, timeout=15)
     if resp.status_code == 200:
         try:
@@ -243,30 +205,15 @@ def discord_member(did: str) -> dict:
             return {"status_code": resp.status_code, "error": resp.text}
     return {"status_code": resp.status_code, "error": resp.text}
 
+def discord_is_banned(did: str) -> bool:
+    if not DISCORD_GUILD_ID or not DISCORD_BOT_TOKEN:
+        return False
+    url = f"{DISCORD_API_BASE}/guilds/{DISCORD_GUILD_ID}/bans/{did}"
+    resp = requests.get(url, headers={"Authorization": f"Bot {DISCORD_BOT_TOKEN}"}, timeout=15)
+    return resp.status_code == 200
 
 def discord_has_role(member: dict) -> bool:
     return str(DISCORD_ROLE_ID) in [str(r) for r in member.get("roles", [])]
-
-
-def discord_add_role(did: str) -> bool:
-    if not DISCORD_GUILD_ID or not DISCORD_BOT_TOKEN or not DISCORD_ROLE_ID:
-        return False
-    url = f"https://discord.com/api/guilds/{DISCORD_GUILD_ID}/members/{did}/roles/{DISCORD_ROLE_ID}"
-    resp = requests.put(url, headers={"Authorization": f"Bot {DISCORD_BOT_TOKEN}"}, timeout=15)
-    return resp.status_code in (200, 204)
-
-
-def discord_remove_role(did: str) -> bool:
-    if not DISCORD_GUILD_ID or not DISCORD_BOT_TOKEN or not DISCORD_ROLE_ID:
-        return False
-    url = f"https://discord.com/api/guilds/{DISCORD_GUILD_ID}/members/{did}/roles/{DISCORD_ROLE_ID}"
-    resp = requests.delete(url, headers={"Authorization": f"Bot {DISCORD_BOT_TOKEN}"}, timeout=15)
-    return resp.status_code in (200, 204)
-
-
-def should_assign_on_login(did: str) -> bool:
-    return global_override or bool(admin_overrides.get(did, False))
-
 
 # ---------------------------------------------------------------------------
 # Error handler
@@ -276,7 +223,6 @@ def handle_exception(e):
     logging.exception("Unhandled exception:")
     return jsonify({"ok": False, "error": str(e)}), 500
 
-
 # ---------------------------------------------------------------------------
 # Front-end redirects
 # ---------------------------------------------------------------------------
@@ -284,36 +230,24 @@ def handle_exception(e):
 def serve_index():
     return redirect(IONOS_BASE)
 
-
 @app.route("/admin")
 def serve_admin():
     if not require_owner():
         return "Forbidden", 403
     return redirect(IONOS_ADMIN)
 
-
 @app.route("/games")
 def serve_games():
     return redirect(IONOS_GAMES)
-
 
 @app.route("/privacy")
 def serve_privacy():
     return redirect(IONOS_PRIVACY)
 
-
 @app.route("/donate")
 def serve_donate():
     return redirect(IONOS_DONATE)
 
-
-@app.route("/admin/logins")
-def admin_logins():
-    if not require_owner():
-        return jsonify({"ok": False, "message": "Forbidden"}), 403
-    return jsonify({"ok": True, "logins": login_history}), 200
-
-# app.py (part 2/2-B)
 # ---------------------------------------------------------------------------
 # OAuth endpoints
 # ---------------------------------------------------------------------------
@@ -322,14 +256,13 @@ def login_discord():
     state = make_state()
     redirect_uri = DISCORD_REDIRECT or f"{request.url_root.rstrip('/')}/login/discord/callback"
     auth_url = (
-        "https://discord.com/api/oauth2/authorize"
+        f"{DISCORD_API_BASE}/oauth2/authorize"
         f"?client_id={DISCORD_CLIENT_ID}"
         f"&redirect_uri={redirect_uri}"
         f"&response_type=code&scope=identify"
         f"&state={state}"
     )
     return redirect(auth_url)
-
 
 def _discord_callback():
     state = request.args.get("state", "")
@@ -350,52 +283,52 @@ def _discord_callback():
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="utf-8"/>
-  <title>Discord rate limited</title>
-  <meta name="viewport" content="width=device-width,initial-scale=1"/>
-  <style>
-    body{background:#0b0b0b;color:#eee;font-family:Inter,SegoeUI,Arial;margin:0;display:flex;align-items:center;justify-content:center;height:100vh}
-    .card{max-width:720px;padding:28px;border-radius:12px;background:linear-gradient(180deg,#0f0f0f,#070707);box-shadow:0 20px 50px rgba(0,0,0,0.7);text-align:center}
-    h1{color:#f0c851;margin:0 0 8px;font-size:20px}
-    p{color:#ccc;margin:8px 0 12px}
-    .meta{font-family:monospace;color:#bbb;background:#080808;padding:10px;border-radius:8px;text-align:left;max-height:160px;overflow:auto}
-    .actions{margin-top:14px}
-    a.button{display:inline-block;padding:10px 14px;border-radius:10px;background:#d4af37;color:#070707;font-weight:700;text-decoration:none;margin:0 6px}
-    a.link{color:#9fb8ff;text-decoration:underline}
-  </style>
+<meta charset="utf-8"/>
+<title>Discord rate limited</title>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<style>
+body {background:#0b0b0b;color:#eee;font-family:Inter,SegoeUI,Arial;margin:0;display:flex;align-items:center;justify-content:center;height:100vh}
+.card {max-width:720px;padding:28px;border-radius:12px;background:linear-gradient(180deg,#0f0f0f,#070707);box-shadow:0 20px 50px rgba(0,0,0,0.7);text-align:center}
+h1 {color:#f0c851;margin:0 0 8px;font-size:20px}
+p {color:#ccc;margin:8px 0 12px}
+.meta {font-family:monospace;color:#bbb;background:#080808;padding:10px;border-radius:8px;text-align:left;max-height:160px;overflow:auto}
+.actions {margin-top:14px}
+a.button {display:inline-block;padding:10px 14px;border-radius:10px;background:#d4af37;color:#070707;font-weight:700;text-decoration:none;margin:0 6px}
+a.link {color:#9fb8ff;text-decoration:underline}
+</style>
 </head>
 <body>
-  <div class="card">
-    <h1>Discord is rate limiting token exchanges</h1>
-    <p>We received a rate-limit response from Discord. Please wait and try again. If the problem persists, try again later.</p>
-    <div class="meta"><strong>Retry-After:</strong> {{ retry_after }} seconds
-    <br/><br/><strong>Server response (truncated):</strong>
-    <pre>{{ body_preview }}</pre></div>
-    <div class="actions">
-      <a class="button" href="{{ retry_link }}">Retry now</a>
-      <a class="link" href="{{ index_link }}">Return to site (without logging in)</a>
-    </div>
-  </div>
+<div class="card">
+<h1>Discord is rate limiting token exchanges</h1>
+<p>Please wait and try again. If the problem persists, try again later.</p>
+<div class="meta"><strong>Retry-After:</strong> {{ retry_after }} seconds
+<br/><br/><strong>Server response (truncated):</strong>
+<pre>{{ body_preview }}</pre></div>
+<div class="actions">
+<a class="button" href="{{ retry_link }}">Retry now</a>
+<a class="link" href="{{ index_link }}">Return to site (without logging in)</a>
+</div>
+</div>
 </body>
 </html>
         """, retry_after=retry_after, body_preview=body_preview, retry_link=request.base_url + "?" + request.query_string.decode(), index_link=IONOS_INDEX), 429
 
     if isinstance(token_resp, dict) and token_resp.get("error"):
         logging.warning("Token exchange failed: %s", token_resp)
-        brief = json.dumps({k: token_resp.get(k) for k in ("error", "status") if k in token_resp})
+        brief = _safe_json(type("obj", (), {"json": lambda: token_resp})())  # small preview
         body_preview = (token_resp.get("body") or "")[:800]
         return render_template_string("""
 <!DOCTYPE html>
 <html lang="en">
 <head><meta charset="utf-8"/><title>Login error</title><meta name="viewport"content="width=device-width,initial-scale=1"/></head>
 <body style="background:#070707;color:#eee;font-family:Inter,SegoeUI,Arial;display:flex;align-items:center;justify-content:center;height:100vh;margin:0">
-  <div style="max-width:720px;padding:24px;border-radius:10px;background:#0c0c0c">
-    <h2 style="color:#f0c851;margin:0 0 8px">Login failed</h2>
-    <p style="color:#ccc">Token exchange failed. Details:</p>
-    <pre style="background:#080808;color:#ddd;padding:10px;border-radius:8px;overflow:auto">{{ brief }}</pre>
-    <pre style="background:#020202;color:#ddd;padding:10px;border-radius:8px;overflow:auto">{{ body_preview }}</pre>
-    <p style="margin-top:12px"><a style="color:#d4af37" href="{{ index_link }}">Return to site</a></p>
-  </div>
+<div style="max-width:720px;padding:24px;border-radius:10px;background:#0c0c0c">
+<h2 style="color:#f0c851;margin:0 0 8px">Login failed</h2>
+<p style="color:#ccc">Token exchange failed. Details:</p>
+<pre style="background:#080808;color:#ddd;padding:10px;border-radius:8px;overflow:auto">{{ brief }}</pre>
+<pre style="background:#020202;color:#ddd;padding:10px;border-radius:8px;overflow:auto">{{ body_preview }}</pre>
+<p style="margin-top:12px"><a style="color:#d4af37" href="{{ index_link }}">Return to site</a></p>
+</div>
 </body>
 </html>
         """, brief=brief, body_preview=body_preview, index_link=IONOS_INDEX), 400
@@ -406,16 +339,10 @@ def _discord_callback():
         return jsonify({"ok": False, "message": "Token exchange succeeded but no access_token returned", "details": token_resp}), 400
 
     user_info = discord_get_user(access_token)
-    did = str(user_info.get("id", "") or "")
+    did = str(user_info.get("id") or "")
     if not did:
         logging.warning("discord_get_user failed: %s", user_info)
         return jsonify({"ok": False, "message": "Discord user lookup failed", "details": user_info}), 400
-
-    try:
-        if should_assign_on_login(did):
-            discord_add_role(did)
-    except Exception:
-        logging.exception("Role assignment failed")
 
     session.permanent = True
     session["user"] = {
@@ -424,7 +351,6 @@ def _discord_callback():
         "discriminator": user_info.get("discriminator", ""),
         "ts": now_ts()
     }
-    login_history.append(session["user"])
 
     # ID copy gate page then send to front-end index with discord_id query param
     return render_template_string("""
@@ -435,16 +361,16 @@ def _discord_callback():
   <title>Confirm Your Discord ID</title>
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <style>
-    body{background:#0a0a0a;color:#eee;font-family:Inter,SegoeUI,Arial, sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0}
-    .card{background:rgba(0,0,0,0.6);padding:2rem;border-radius:12px;box-shadow:0 0 20px rgba(0,0,0,0.7);text-align:center;max-width:520px}
-    h2{color:#FFD700;margin-bottom:.5rem}
-    p{color:#ccc}
-    .id{font-size:1.2rem;margin:1rem 0;color:#fff;word-break:break-all}
-    .row{display:flex;gap:.75rem;justify-content:center;margin-top:1rem}
-    button{padding:.75rem 1.25rem;border:none;border-radius:8px;cursor:pointer;font-weight:bold;color:#fff;background:#111}
-    button.primary{background:#2b2b2b}
-    button.enabled{background:#1a73e8}
-    button.disabled{opacity:.6;cursor:not-allowed}
+    body {background:#0a0a0a;color:#eee;font-family:Inter,SegoeUI,Arial, sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0}
+    .card {background:rgba(0,0,0,0.6);padding:2rem;border-radius:12px;box-shadow:0 0 20px rgba(0,0,0,0.7);text-align:center;max-width:520px}
+    h2 {color:#FFD700;margin-bottom:.5rem}
+    p {color:#ccc}
+    .id {font-size:1.2rem;margin:1rem 0;color:#fff;word-break:break-all}
+    .row {display:flex;gap:.75rem;justify-content:center;margin-top:1rem}
+    button {padding:.75rem 1.25rem;border:none;border-radius:8px;cursor:pointer;font-weight:bold;color:#fff;background:#111}
+    button.primary {background:#2b2b2b}
+    button.enabled {background:#1a73e8}
+    button.disabled {opacity:.6;cursor:not-allowed}
   </style>
 </head>
 <body>
@@ -491,19 +417,16 @@ def _discord_callback():
 </html>
     """, did=did, ionos_index=IONOS_INDEX)
 
-
 @app.route("/login/discord/callback")
 def discord_callback_login():
     return _discord_callback()
-
 
 @app.route("/discord/callback")
 def discord_callback_plain():
     return _discord_callback()
 
-
 # ---------------------------------------------------------------------------
-# Session / Portal / Logout / Status
+# Session / Portal / Logout
 # ---------------------------------------------------------------------------
 @app.route("/portal/me")
 def portal_me():
@@ -512,98 +435,71 @@ def portal_me():
         return jsonify({"ok": False, "message": "Not logged in"}), 401
     return jsonify({"ok": True, "user": user}), 200
 
-
 @app.route("/logout")
 def logout():
     session.clear()
     return redirect(IONOS_BASE)
 
-
+# ---------------------------------------------------------------------------
+# Status endpoint for game: membership + ban checks with invite link
+# ---------------------------------------------------------------------------
 @app.route("/status/<did>")
 def status(did):
-    if global_override:
-        return jsonify({"ok": True, "role_granted": True, "message": "GLOBAL OVERRIDE ACTIVE"}), 200
-    if admin_overrides.get(did):
-        return jsonify({"ok": True, "role_granted": True, "message": "ADMIN OVERRIDE"}), 200
+    # Check ban first
+    if discord_is_banned(did):
+        return jsonify({
+            "ok": False,
+            "role_granted": False,
+            "message": "Access denied. You are banned from the server for violating the rules."
+        }), 403
+
+    # Check membership
     member = discord_member(did)
-    if "roles" in member:
-        has = discord_has_role(member)
-        return jsonify({"ok": True, "role_granted": has, "message": ("Role present" if has else "Role missing")}), 200
-    return jsonify({"ok": False, "role_granted": False, "message": f"Member lookup error (status {member.get('status_code')})"}), 404
+    if member.get("status_code") == 404:
+        # Not a member: provide a blue clickable link (Markdown-style)
+        return jsonify({
+            "ok": False,
+            "role_granted": False,
+            "message": f"Join our Discord server to unlock this mod.\n[Click here to join]({DISCORD_INVITE})"
+        }), 403
 
+    if "roles" in member or member.get("user"):
+        # Member found → allow
+        return jsonify({
+            "ok": True,
+            "role_granted": True,
+            "message": "Welcome back! Mod unlocked successfully."
+        }), 200
 
-@app.route("/health")
-def health():
-    return jsonify({"ok": True, "ts": now_ts()}), 200
-
-
-# ---------------------------------------------------------------------------
-# Override endpoints (owner only)
-# ---------------------------------------------------------------------------
-@app.route("/override/all", methods=["GET", "POST", "DELETE"])
-def override_all():
-    global global_override
-    if not require_owner():
-        return jsonify({"ok": False, "message": "Forbidden"}), 403
-    if request.method == "GET":
-        return jsonify({"ok": True, "global_override": global_override}), 200
-    if request.method == "POST":
-        global_override = True
-        save_state()
-        return jsonify({"ok": True, "global_override": True}), 200
-    if request.method == "DELETE":
-        global_override = False
-        save_state()
-        return jsonify({"ok": True, "global_override": False}), 200
-    return jsonify({"ok": False, "message": "Method not allowed"}), 405
-
-
-@app.route("/override/<did>", methods=["GET", "POST", "DELETE"])
-def override_user(did):
-    if not require_owner():
-        return jsonify({"ok": False, "message": "Forbidden"}), 403
-    if request.method == "GET":
-        return jsonify({"ok": True, "user_override": bool(admin_overrides.get(did)), "discord_id": did}), 200
-    if request.method == "POST":
-        admin_overrides[did] = {"username": "", "discriminator": ""}
-        save_state()
-        return jsonify({"ok": True, "user_override": True, "discord_id": did}), 200
-    if request.method == "DELETE":
-        admin_overrides.pop(did, None)
-        save_state()
-        return jsonify({"ok": True, "user_override": False, "discord_id": did}), 200
-    return jsonify({"ok": False, "message": "Method not allowed"}), 405
-
-
-@app.route("/override", methods=["GET"])
-def list_overrides():
-    if not require_owner():
-        return jsonify({"ok": False, "message": "Forbidden"}), 403
-    users = []
-    for did, info in admin_overrides.items():
-        users.append({"id": did, "username": info.get("username", ""), "discriminator": info.get("discriminator", "")})
-    return jsonify({"ok": True, "global_override": global_override, "users": users}), 200
-
+    # Unknown error during member lookup
+    return jsonify({
+        "ok": False,
+        "role_granted": False,
+        "message": f"Member lookup error (status {member.get('status_code')})"
+    }), 404
 
 # ---------------------------------------------------------------------------
-# Role removal endpoints (owner only)
+# Optional: role management endpoints (owner only) – keep if you still need them
 # ---------------------------------------------------------------------------
 @app.route("/remove_role_now/<did>", methods=["POST"])
 def remove_role_now(did):
     if not require_owner():
         return jsonify({"ok": False, "message": "Forbidden"}), 403
-    success = discord_remove_role(did)
+    if not DISCORD_GUILD_ID or not DISCORD_BOT_TOKEN or not DISCORD_ROLE_ID:
+        return jsonify({"ok": False, "message": "Missing guild/bot/role"}), 400
+    url = f"{DISCORD_API_BASE}/guilds/{DISCORD_GUILD_ID}/members/{did}/roles/{DISCORD_ROLE_ID}"
+    resp = requests.delete(url, headers={"Authorization": f"Bot {DISCORD_BOT_TOKEN}"}, timeout=15)
+    success = resp.status_code in (200, 204)
     status_code = 200 if success else 500
     return jsonify({"ok": success, "discord_id": did}), status_code
-
 
 @app.route("/remove_role_all", methods=["POST"])
 def remove_role_all():
     if not require_owner():
         return jsonify({"ok": False, "message": "Forbidden"}), 403
-    if not DISCORD_GUILD_ID or not DISCORD_BOT_TOKEN:
-        return jsonify({"ok": False, "message": "Missing guild or bot token"}), 400
-    url = f"https://discord.com/api/guilds/{DISCORD_GUILD_ID}/members?limit=1000"
+    if not DISCORD_GUILD_ID or not DISCORD_BOT_TOKEN or not DISCORD_ROLE_ID:
+        return jsonify({"ok": False, "message": "Missing guild/bot/role"}), 400
+    url = f"{DISCORD_API_BASE}/guilds/{DISCORD_GUILD_ID}/members?limit=1000"
     headers = {"Authorization": f"Bot {DISCORD_BOT_TOKEN}"}
     resp = requests.get(url, headers=headers, timeout=15)
     if resp.status_code != 200:
@@ -613,7 +509,7 @@ def remove_role_all():
     for m in members:
         did = str(m["user"]["id"])
         r = requests.delete(
-            f"https://discord.com/api/guilds/{DISCORD_GUILD_ID}/members/{did}/roles/{DISCORD_ROLE_ID}",
+            f"{DISCORD_API_BASE}/guilds/{DISCORD_GUILD_ID}/members/{did}/roles/{DISCORD_ROLE_ID}",
             headers=headers, timeout=15
         )
         if r.status_code in (200, 204):
@@ -628,6 +524,12 @@ def remove_role_all():
         "failed_sample": failed[:10]
     }), 200
 
+# ---------------------------------------------------------------------------
+# Health
+# ---------------------------------------------------------------------------
+@app.route("/health")
+def health():
+    return jsonify({"ok": True, "ts": now_ts()}), 200
 
 # ---------------------------------------------------------------------------
 # Run server
