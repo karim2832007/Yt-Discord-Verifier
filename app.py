@@ -34,19 +34,21 @@ from dotenv import load_dotenv
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
 
-# App setup
+## ================== APP SETUP ==================
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", secrets.token_hex(32))
 app.permanent_session_lifetime = timedelta(days=1)
 
 # Ensure session cookie is emitted and usable for cross-site login flows
 app.config.update(
-    SESSION_COOKIE_NAME = os.environ.get('SESSION_COOKIE_NAME', 'session'),
-    SESSION_COOKIE_DOMAIN = os.environ.get('SESSION_COOKIE_DOMAIN', '.onrender.com'),
+    SESSION_COOKIE_NAME = os.environ.get("SESSION_COOKIE_NAME", "session"),
+    SESSION_COOKIE_DOMAIN = os.environ.get("SESSION_COOKIE_DOMAIN", ".onrender.com"),
     SESSION_COOKIE_SECURE = True,
     SESSION_COOKIE_SAMESITE = "None",
     SESSION_COOKIE_HTTPONLY = True,
+    PROPAGATE_EXCEPTIONS = True,
 )
+
 
 
 # Config / urls
