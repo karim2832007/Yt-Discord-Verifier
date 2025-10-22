@@ -1,16 +1,19 @@
 # app.py
 """
-Fixed Flask verifier
-- Session-based OAuth state to avoid state signature/TTL issues
-- Properly encoded Discord authorize URL with prompt=consent to discourage native app handoff
-- Ensures cookie/CORS settings align with backend origin (use SESSION_COOKIE_DOMAIN env)
-- Endpoints: /login/discord, /login/discord/callback, /portal/me, /status/<id>,
-  /generate_key, /validate_key/<id>/<key>, logout, overrides and admin helpers
-- Single active unused key persisted to KEYS_FILE
-Env:
+Complete patched verifier
+- Session-based OAuth state
+- Server-built authorize URL with prompt=consent and proper encoding
+- Same-tab redirects (do not open in new tab)
+- /login/browser-fallback route to recover when the Discord app intercepts the link
+- CORS and cookie settings suitable for cross-site session usage
+- Endpoints: /login/discord, /login/discord/callback, /login/browser-fallback,
+  /portal/me, /status/<id>, /generate_key, /validate_key/<id>/<key>, /logout,
+  overrides and admin helpers
+Environment variables required/optional:
   SECRET_KEY, BASE_URL, SESSION_COOKIE_DOMAIN, DISCORD_CLIENT_ID,
-  DISCORD_CLIENT_SECRET, DISCORD_REDIRECT (optional), DISCORD_GUILD_ID,
-  DISCORD_ROLE_ID, DISCORD_BOT_TOKEN, OWNER_ID, STORE_DIR, KEYS_FILE, PORT
+  DISCORD_CLIENT_SECRET, DISCORD_REDIRECT (optional),
+  DISCORD_GUILD_ID, DISCORD_ROLE_ID, DISCORD_BOT_TOKEN, OWNER_ID,
+  STORE_DIR (optional), KEYS_FILE (optional), PORT (optional)
 """
 import os
 import time
@@ -22,14 +25,16 @@ from datetime import timedelta
 from typing import Dict, Any
 from urllib.parse import urlencode, quote_plus
 import requests
-from flask import Flask, redirect, request, session, jsonify, render_template_string, make_response
+from flask import (
+    Flask, redirect, request, session, jsonify, render_template_string, make_response, url_for
+)
 from flask_cors import CORS
 from dotenv import load_dotenv
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
 
-# App
+# App setup
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", secrets.token_hex(32))
 app.permanent_session_lifetime = timedelta(days=1)
@@ -39,8 +44,8 @@ BASE_URL = os.environ.get("BASE_URL", "https://gaming-mods.com").rstrip("/")
 IONOS_INDEX = f"{BASE_URL}/index.html"
 IONOS_GAMES = f"{BASE_URL}/games.html"
 
-# Cookie / CORS: ensure this matches the host that will receive the session cookie
-# Recommended: set SESSION_COOKIE_DOMAIN to the parent domain of your backend host (e.g. ".onrender.com")
+# Cookie / CORS: ensure this matches the host that should receive session cookie
+# Example for onrender: SESSION_COOKIE_DOMAIN=".onrender.com"
 SESSION_COOKIE_DOMAIN = os.environ.get("SESSION_COOKIE_DOMAIN", "") or None
 if SESSION_COOKIE_DOMAIN:
     app.config.update(
@@ -52,12 +57,13 @@ if SESSION_COOKIE_DOMAIN:
 else:
     app.config.update(PROPAGATE_EXCEPTIONS=True)
 
+# Allow static site origin to call APIs with credentials
 CORS(app, origins=[BASE_URL], supports_credentials=True)
 
 # Discord / owner config
 DISCORD_CLIENT_ID = os.environ.get("DISCORD_CLIENT_ID", "")
 DISCORD_CLIENT_SECRET = os.environ.get("DISCORD_CLIENT_SECRET", "")
-DISCORD_REDIRECT = os.environ.get("DISCORD_REDIRECT", "").strip()  # optional override
+DISCORD_REDIRECT = os.environ.get("DISCORD_REDIRECT", "").strip()  # optional override (must match Discord app)
 DISCORD_GUILD_ID = os.environ.get("DISCORD_GUILD_ID", "")
 DISCORD_ROLE_ID = os.environ.get("DISCORD_ROLE_ID", "")
 DISCORD_BOT_TOKEN = os.environ.get("DISCORD_BOT_TOKEN", "")
@@ -126,7 +132,7 @@ def _safe_json(resp: requests.Response) -> dict:
     except Exception:
         return {}
 
-# Discord API helpers
+# Discord helpers
 def discord_exchange_token(code: str, redirect_uri: str) -> dict:
     url = "https://discord.com/api/oauth2/token"
     data = {
@@ -140,17 +146,17 @@ def discord_exchange_token(code: str, redirect_uri: str) -> dict:
     try:
         resp = requests.post(url, data=data, headers=headers, timeout=15)
         return _safe_json(resp) if resp.status_code == 200 else {"error": "token_error", "status": resp.status_code, "body": resp.text}
-    except Exception as e:
+    except Exception:
         logging.exception("discord_exchange_token")
-        return {"error": "network", "message": str(e)}
+        return {"error": "network", "message": "token exchange network error"}
 
 def discord_get_user(token: str) -> dict:
     try:
         resp = requests.get("https://discord.com/api/users/@me", headers={"Authorization": f"Bearer {token}"}, timeout=15)
         return _safe_json(resp) if resp.status_code == 200 else {"error": "user_error", "status": resp.status_code, "body": resp.text}
-    except Exception as e:
+    except Exception:
         logging.exception("discord_get_user")
-        return {"error": "network", "message": str(e)}
+        return {"error": "network", "message": "user fetch failed"}
 
 def discord_member(did: str) -> dict:
     if not DISCORD_GUILD_ID or not DISCORD_BOT_TOKEN:
@@ -160,9 +166,9 @@ def discord_member(did: str) -> dict:
         if resp.status_code == 200:
             return _safe_json(resp)
         return {"status_code": resp.status_code, "error": resp.text}
-    except Exception as e:
+    except Exception:
         logging.exception("discord_member")
-        return {"status_code": 500, "error": str(e)}
+        return {"status_code": 500, "error": "member lookup failed"}
 
 def discord_is_banned(did: str) -> bool:
     if not DISCORD_GUILD_ID or not DISCORD_BOT_TOKEN:
@@ -197,7 +203,10 @@ def discord_remove_role(did: str) -> bool:
         logging.exception("discord_remove_role")
         return False
 
-# Utility to build a properly encoded Discord authorize URL with prompt=consent
+def should_assign_on_login(did: str) -> bool:
+    return global_override or bool(admin_overrides.get(did, False))
+
+# Build properly encoded authorize URL with prompt=consent
 def build_discord_authorize_url(state: str) -> str:
     redirect_uri = DISCORD_REDIRECT or (request.url_root.rstrip("/") + "/login/discord/callback")
     params = {
@@ -206,7 +215,7 @@ def build_discord_authorize_url(state: str) -> str:
         "response_type": "code",
         "scope": "identify",
         "state": state,
-        "prompt": "consent"   # encourage the web consent flow
+        "prompt": "consent"
     }
     return "https://discord.com/api/oauth2/authorize?" + urlencode(params, quote_via=quote_plus)
 
@@ -225,7 +234,7 @@ def index():
 def games():
     return redirect(IONOS_GAMES)
 
-# OAuth: session-based state (robust)
+# OAuth start: session-based state and same-tab redirect
 @app.route("/login/discord")
 def login_discord():
     if not DISCORD_CLIENT_ID:
@@ -233,19 +242,48 @@ def login_discord():
     state = secrets.token_urlsafe(24)
     session['oauth_state'] = state
     auth_url = build_discord_authorize_url(state)
-    logging.info("Redirecting to Discord authorize URL: %s", auth_url)
-    # redirect in same top-level tab to avoid deep-link handoff
+    logging.info("login_discord -> state=%s auth_url=%s", state, auth_url)
     return redirect(auth_url)
 
+# Browser fallback: used when mobile app intercepts the deep link
+@app.route("/login/browser-fallback")
+def browser_fallback():
+    # show a small page that instructs the user to open in browser and retry
+    verifier_login = (request.url_root.rstrip("/") + "/login/discord")
+    fallback_html = """
+    <!doctype html>
+    <html>
+      <head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Open in browser</title></head>
+      <body style="font-family:system-ui,Arial,sans-serif;display:flex;min-height:100vh;align-items:center;justify-content:center;margin:0;background:#0b0b0b;color:#eee">
+        <div style="max-width:520px;padding:28px;border-radius:12px;background:#0f0f0f;border:1px solid rgba(255,255,255,0.04);text-align:center;">
+          <h1 style="margin:0 0 12px;font-size:20px">Open in browser to continue</h1>
+          <p style="color:#bbb;margin:0 0 18px">Your device opened the Discord app. To complete login in your browser, tap the button below.</p>
+          <button id="retry" style="appearance:none;border:0;padding:12px 18px;border-radius:8px;background:#ffb000;color:#000;font-weight:700;cursor:pointer">Retry login in browser</button>
+          <p style="font-size:13px;color:#999;margin-top:12px">If redirected again into the Discord app, return here and use the browser option in your OS.</p>
+        </div>
+        <script>
+          document.getElementById('retry').addEventListener('click', function(){
+            // same-window navigation to the verifier login (preserves top-level tab)
+            window.location.href = '%s';
+          });
+        </script>
+      </body>
+    </html>
+    """ % verifier_login
+    return fallback_html, 200, {"Content-Type": "text/html; charset=utf-8"}
+
+# OAuth callback
 @app.route("/login/discord/callback")
 def login_callback():
     state = request.args.get("state", "")
     code = request.args.get("code", "")
     saved = session.pop('oauth_state', None)
     logging.info("OAuth callback received state=%r saved=%r code_present=%s", state, saved, bool(code))
+    # If state missing or doesn't match, guide user to fallback
     if not state or not saved or not secrets.compare_digest(state, saved):
-        logging.warning("Invalid or expired OAuth state")
-        return "Invalid or expired state", 400
+        logging.warning("Invalid or expired OAuth state; directing user to fallback")
+        # send to browser fallback page (helps mobile users)
+        return redirect(url_for('browser_fallback'))
     if not code:
         return "Missing code", 400
 
@@ -271,7 +309,7 @@ def login_callback():
     is_member = "roles" in member_resp
     has_role = bool(is_member and discord_has_role(member_resp))
 
-    # set session and log it; response happens after session is set so Set-Cookie header is emitted
+    # persist session (this response will include Set-Cookie)
     session.permanent = True
     session["user"] = {"id": did, "username": user_info.get("username", ""), "discriminator": user_info.get("discriminator", ""), "ts": now_ts()}
     login_history.append(session["user"])
@@ -292,12 +330,12 @@ def login_callback():
     if not has_role:
         return render_template_string("<h2>Role missing</h2><p>Membership verified but required role missing.</p><p><a href='{{home}}'>Continue</a></p>", home=BASE_URL), 200
 
-    # Redirect back to main site; session cookie should be set by this response
+    # Redirect back to main site; Set-Cookie emitted by session
     resp = make_response(redirect(BASE_URL))
     logging.info("Redirecting back to %s with session cookie", BASE_URL)
     return resp
 
-# Session and status endpoints
+# Portal info
 @app.route("/portal/me")
 def portal_me():
     user = session.get("user")
@@ -305,6 +343,7 @@ def portal_me():
         return jsonify({"ok": False, "message": "Not logged in"}), 401
     return jsonify({"ok": True, "user": user}), 200
 
+# Status endpoint
 @app.route("/status/<did>")
 def status(did):
     if not is_valid_discord_id(did):
@@ -313,7 +352,6 @@ def status(did):
         return jsonify({"ok": True, "role_granted": True, "message": "GLOBAL OVERRIDE"}), 200
     if admin_overrides.get(did):
         return jsonify({"ok": True, "role_granted": True, "message": "ADMIN OVERRIDE"}), 200
-
     banned = discord_is_banned(did)
     member = discord_member(did)
     if banned:
@@ -323,12 +361,13 @@ def status(did):
         return jsonify({"ok": True, "role_granted": has, "message": ("Role present" if has else "Role missing")}), 200
     return jsonify({"ok": False, "role_granted": False, "message": ("Not in server" if member.get("status_code") == 404 else f"Member lookup error ({member.get('status_code')})")}), 404
 
+# Logout
 @app.route("/logout")
 def logout():
     session.clear()
     return redirect(BASE_URL)
 
-# Keys: single active key per user
+# Keys
 def _make_key_value(did: str) -> str:
     rnd = secrets.token_hex(24).upper()
     return f"GMD-{did}-{rnd}"
@@ -341,18 +380,15 @@ def generate_key():
     did = str(user.get("id") or "")
     if not is_valid_discord_id(did):
         return jsonify({"ok": False, "message": "Invalid user ID"}), 400
-
     member = discord_member(did)
     if "roles" not in member:
         return jsonify({"ok": False, "message": "Join the server before requesting a key"}), 403
     if not (discord_has_role(member) or global_override or admin_overrides.get(did)):
         return jsonify({"ok": False, "message": "Required role missing"}), 403
-
     store = load_keys()
     entry = store.get(did)
     if entry and not entry.get("used"):
         return jsonify({"ok": False, "message": "Active key already exists. Use it first."}), 409
-
     key_value = _make_key_value(did)
     store[did] = {"key": key_value, "used": False, "created_at": now_ts(), "used_at": None, "audit": [{"ts": now_ts(), "event": "issued"}]}
     save_keys(store)
@@ -364,43 +400,35 @@ def validate_key(did, key):
     key = str(key or "").strip()
     def fail(status, msg):
         return jsonify({"ok": False, "valid": False, "message": msg}), status
-
     if not is_valid_discord_id(did):
         return fail(400, "Invalid ID format")
     if not key or not key.startswith(f"GMD-{did}-"):
         return fail(400, "Malformed key")
-
     try:
         if discord_is_banned(did):
             return fail(403, "Banned from server")
     except Exception:
         return fail(500, "Ban check failed")
-
     try:
         member = discord_member(did)
     except Exception:
         return fail(500, "Member lookup failed")
-
     if "roles" not in member:
         code = member.get("status_code")
         if code == 404:
             return fail(404, "Not in server")
         return fail(502, f"Member lookup error ({code})")
-
     has_role = False
     try:
         has_role = discord_has_role(member) or global_override or bool(admin_overrides.get(did))
     except Exception:
         has_role = False
-
     if not has_role:
         return fail(403, "Role missing")
-
     try:
         store = load_keys()
     except Exception:
         return fail(500, "Key store load failed")
-
     entry = store.get(did)
     if not entry:
         return fail(404, "No key issued for this user")
@@ -408,7 +436,6 @@ def validate_key(did, key):
         return fail(410, "Key already used")
     if str(entry.get("key")) != key:
         return fail(400, "Incorrect key")
-
     try:
         entry["used"] = True
         entry["used_at"] = now_ts()
@@ -419,10 +446,9 @@ def validate_key(did, key):
         save_keys(store)
     except Exception:
         return fail(500, "Failed to consume key")
-
     return jsonify({"ok": True, "valid": True, "message": "Key valid and consumed"}), 200
 
-# Admin / overrides (owner only)
+# Admin overrides
 @app.route("/override/all", methods=["GET", "POST", "DELETE"])
 def override_all():
     global global_override
