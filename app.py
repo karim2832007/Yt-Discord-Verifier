@@ -1,16 +1,16 @@
 # app.py
 """
-Flask verifier (full remake)
-- Uses session-based OAuth state to avoid signature/TTL issues
-- Correct cookie and CORS settings for cross-site session use
+Fixed Flask verifier
+- Session-based OAuth state to avoid state signature/TTL issues
+- Properly encoded Discord authorize URL with prompt=consent to discourage native app handoff
+- Ensures cookie/CORS settings align with backend origin (use SESSION_COOKIE_DOMAIN env)
 - Endpoints: /login/discord, /login/discord/callback, /portal/me, /status/<id>,
   /generate_key, /validate_key/<id>/<key>, logout, overrides and admin helpers
-- Keys persisted to KEYS_FILE; single active unused key enforced
-Environment variables:
+- Single active unused key persisted to KEYS_FILE
+Env:
   SECRET_KEY, BASE_URL, SESSION_COOKIE_DOMAIN, DISCORD_CLIENT_ID,
   DISCORD_CLIENT_SECRET, DISCORD_REDIRECT (optional), DISCORD_GUILD_ID,
-  DISCORD_ROLE_ID, DISCORD_BOT_TOKEN, OWNER_ID, STORE_DIR (optional),
-  KEYS_FILE (optional), PORT (optional)
+  DISCORD_ROLE_ID, DISCORD_BOT_TOKEN, OWNER_ID, STORE_DIR, KEYS_FILE, PORT
 """
 import os
 import time
@@ -20,8 +20,9 @@ import json
 import re
 from datetime import timedelta
 from typing import Dict, Any
+from urllib.parse import urlencode, quote_plus
 import requests
-from flask import Flask, redirect, request, session, jsonify, render_template_string
+from flask import Flask, redirect, request, session, jsonify, render_template_string, make_response
 from flask_cors import CORS
 from dotenv import load_dotenv
 
@@ -39,6 +40,7 @@ IONOS_INDEX = f"{BASE_URL}/index.html"
 IONOS_GAMES = f"{BASE_URL}/games.html"
 
 # Cookie / CORS: ensure this matches the host that will receive the session cookie
+# Recommended: set SESSION_COOKIE_DOMAIN to the parent domain of your backend host (e.g. ".onrender.com")
 SESSION_COOKIE_DOMAIN = os.environ.get("SESSION_COOKIE_DOMAIN", "") or None
 if SESSION_COOKIE_DOMAIN:
     app.config.update(
@@ -195,6 +197,19 @@ def discord_remove_role(did: str) -> bool:
         logging.exception("discord_remove_role")
         return False
 
+# Utility to build a properly encoded Discord authorize URL with prompt=consent
+def build_discord_authorize_url(state: str) -> str:
+    redirect_uri = DISCORD_REDIRECT or (request.url_root.rstrip("/") + "/login/discord/callback")
+    params = {
+        "client_id": DISCORD_CLIENT_ID,
+        "redirect_uri": redirect_uri,
+        "response_type": "code",
+        "scope": "identify",
+        "state": state,
+        "prompt": "consent"   # encourage the web consent flow
+    }
+    return "https://discord.com/api/oauth2/authorize?" + urlencode(params, quote_via=quote_plus)
+
 # Error handler
 @app.errorhandler(Exception)
 def handle_exception(e):
@@ -217,15 +232,9 @@ def login_discord():
         return "Discord client ID not configured", 500
     state = secrets.token_urlsafe(24)
     session['oauth_state'] = state
-    redirect_uri = DISCORD_REDIRECT or (request.url_root.rstrip("/") + "/login/discord/callback")
-    auth_url = (
-        "https://discord.com/api/oauth2/authorize"
-        f"?client_id={DISCORD_CLIENT_ID}"
-        f"&redirect_uri={redirect_uri}"
-        f"&response_type=code&scope=identify"
-        f"&state={state}"
-    )
-    logging.info("Initiating OAuth state=%s redirect=%s", state, redirect_uri)
+    auth_url = build_discord_authorize_url(state)
+    logging.info("Redirecting to Discord authorize URL: %s", auth_url)
+    # redirect in same top-level tab to avoid deep-link handoff
     return redirect(auth_url)
 
 @app.route("/login/discord/callback")
@@ -233,7 +242,7 @@ def login_callback():
     state = request.args.get("state", "")
     code = request.args.get("code", "")
     saved = session.pop('oauth_state', None)
-    logging.info("OAuth callback received state=%r saved=%r code=%r", state, saved, bool(code))
+    logging.info("OAuth callback received state=%r saved=%r code_present=%s", state, saved, bool(code))
     if not state or not saved or not secrets.compare_digest(state, saved):
         logging.warning("Invalid or expired OAuth state")
         return "Invalid or expired state", 400
@@ -262,10 +271,11 @@ def login_callback():
     is_member = "roles" in member_resp
     has_role = bool(is_member and discord_has_role(member_resp))
 
-    # set session
+    # set session and log it; response happens after session is set so Set-Cookie header is emitted
     session.permanent = True
     session["user"] = {"id": did, "username": user_info.get("username", ""), "discriminator": user_info.get("discriminator", ""), "ts": now_ts()}
     login_history.append(session["user"])
+    logging.info("Session set for user %s", did)
 
     # optional admin override behavior
     try:
@@ -282,7 +292,10 @@ def login_callback():
     if not has_role:
         return render_template_string("<h2>Role missing</h2><p>Membership verified but required role missing.</p><p><a href='{{home}}'>Continue</a></p>", home=BASE_URL), 200
 
-    return redirect(BASE_URL)
+    # Redirect back to main site; session cookie should be set by this response
+    resp = make_response(redirect(BASE_URL))
+    logging.info("Redirecting back to %s with session cookie", BASE_URL)
+    return resp
 
 # Session and status endpoints
 @app.route("/portal/me")
