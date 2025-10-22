@@ -525,6 +525,7 @@ def remove_role_now(did):
 def health():
     return jsonify({"ok": True, "ts": now_ts()}), 200
 
-if name == "main":
+# ----------------- MAIN -----------------
+if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port, debug=False)
