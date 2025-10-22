@@ -4,7 +4,7 @@ Flask backend for verifier with server-side key issuance and validation.
 
 Features:
 - Discord OAuth (identify) with secure state signing
-- Cross-site session cookies: static IONOS site can query /portal/me
+- Cross-site session cookies: static site can query /portal/me
 - /status/<id> returns membership and role details; includes "not in server" and "banned" messages
 - /generate_key (POST) issues a single active key per user; refuses if an unused key exists
 - /validate_key/<id>/<key> validates key ownership, membership, role, and consumes the key
@@ -28,7 +28,7 @@ from datetime import timedelta
 from typing import Dict, Any
 import requests
 from flask import (
-    Flask, redirect, request, session, jsonify, render_template_string, url_for
+    Flask, redirect, request, session, jsonify, render_template_string
 )
 from flask_cors import CORS
 from dotenv import load_dotenv
@@ -41,12 +41,13 @@ app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", secrets.token_hex(32))
 app.permanent_session_lifetime = timedelta(days=1)
 
-# Cookie config for cross-site usage (IONOS static site -> verifier)
-SESSION_COOKIE_DOMAIN = os.environ.get("SESSION_COOKIE_DOMAIN", ".gaming-mods.com")
+# Cookie config for cross-site usage
+# If your backend runs on onrender.com, set the cookie domain to ".onrender.com"
+SESSION_COOKIE_DOMAIN = os.environ.get("SESSION_COOKIE_DOMAIN", ".onrender.com")
 app.config.update(
     SESSION_COOKIE_DOMAIN=SESSION_COOKIE_DOMAIN,
-    SESSION_COOKIE_SECURE=True,
-    SESSION_COOKIE_SAMESITE="None",  # required to send cookies cross-site
+    SESSION_COOKIE_SECURE=True,                # required for SameSite=None
+    SESSION_COOKIE_SAMESITE="None",            # cross-site cookies
     PROPAGATE_EXCEPTIONS=True,
 )
 
@@ -58,7 +59,7 @@ IONOS_DONATE = f"{BASE_URL}/donate.html"
 IONOS_PRIVACY = f"{BASE_URL}/privacy.html"
 IONOS_ADMIN = f"{BASE_URL}/admin.html"
 
-# Allow the IONOS origin to call APIs with credentials
+# CORS: allow static site origin to call APIs with credentials
 CORS(app, origins=[BASE_URL], supports_credentials=True)
 
 # -----------------------------------------------------------------------------
@@ -75,8 +76,10 @@ OWNER_ID = os.environ.get("OWNER_ID", "")
 # -----------------------------------------------------------------------------
 # State & overrides
 # -----------------------------------------------------------------------------
-STATE_FILE = "override_state.json"
-KEYS_FILE = "keys_store.json"
+STATE_FILE = os.environ.get("STATE_FILE", "override_state.json")
+STORE_DIR = os.environ.get("STORE_DIR", ".")
+os.makedirs(STORE_DIR, exist_ok=True)
+KEYS_FILE = os.path.join(STORE_DIR, os.environ.get("KEYS_FILE", "keys_store.json"))
 global_override = False
 admin_overrides: Dict[str, Dict[str, Any]] = {}
 login_history = []
@@ -102,12 +105,13 @@ def load_state():
 
 def load_keys() -> Dict[str, Any]:
     try:
-        if os.path.exists(KEYS_FILE):
-            with open(KEYS_FILE) as f:
-                return json.load(f)
+        if not os.path.exists(KEYS_FILE):
+            save_keys({})
+        with open(KEYS_FILE) as f:
+            return json.load(f)
     except Exception:
         logging.exception("Failed to load keys store")
-    return {}
+        return {}
 
 def save_keys(store: Dict[str, Any]):
     try:
@@ -180,7 +184,6 @@ def discord_exchange_token(code: str, redirect_uri: str) -> dict:
         "Accept": "application/json",
         "User-Agent": "GamingMods-Verifier/1.0 (+https://gaming-mods.com)",
     }
-
     MAX_ATTEMPTS = 4
     BACKOFF_BASE = 0.5
     MAX_SLEEP = 5
@@ -308,7 +311,7 @@ def handle_exception(e):
     return jsonify({"ok": False, "error": str(e)}), 500
 
 # -----------------------------------------------------------------------------
-# Front-end redirects (IONOS static site remains authoritative)
+# Front-end redirects (static site remains authoritative)
 # -----------------------------------------------------------------------------
 @app.route("/")
 def serve_index():
@@ -513,7 +516,6 @@ def status(did):
     if admin_overrides.get(did):
         return jsonify({"ok": True, "role_granted": True, "message": "ADMIN OVERRIDE"}), 200
 
-    # Check ban and membership explicitly
     banned = discord_is_banned(did)
     member = discord_member(did)
 
@@ -544,7 +546,7 @@ def _make_key_value(did: str) -> str:
 def generate_key():
     """
     Issues a single active key per user.
-    Requires: logged-in session. Optionally validate role before issuing.
+    Requires: logged-in session. Validates role before issuing.
     Refuses if an unused key already exists.
     """
     user = session.get("user")
@@ -554,21 +556,17 @@ def generate_key():
     if not is_valid_discord_id(did):
         return jsonify({"ok": False, "message": "Invalid user ID"}), 400
 
-    # Optional: enforce role before issuance
     member = discord_member(did)
     if "roles" not in member:
         return jsonify({"ok": False, "message": "Join the server before requesting a key"}), 403
-    if not discord_has_role(member) and not (global_override or admin_overrides.get(did)):
+    if not (discord_has_role(member) or global_override or admin_overrides.get(did)):
         return jsonify({"ok": False, "message": "Required role missing"}), 403
 
     store = load_keys()
     entry = store.get(did)
-
     if entry and not entry.get("used"):
-        # One active key rule
         return jsonify({"ok": False, "message": "Active key already exists. Use or consume it first."}), 409
 
-    # Issue new key
     key_value = _make_key_value(did)
     store[did] = {
         "key": key_value,
@@ -588,43 +586,66 @@ def validate_key(did, key):
     - Key must match the stored active key and be unused
     Returns { ok, valid, message } and consumes on success.
     """
-    did = str(did or "")
+    did = str(did or "").strip()
+    key = str(key or "").strip()
+
+    def fail(status, msg):
+        return jsonify({"ok": False, "valid": False, "message": msg}), status
+
     if not is_valid_discord_id(did):
-        return jsonify({"ok": False, "valid": False, "message": "Invalid ID format"}), 400
+        return fail(400, "Invalid ID format")
+    if not key or not key.startswith(f"GMD-{did}-"):
+        return fail(400, "Malformed key")
 
-    # Check ban/membership/role
-    banned = discord_is_banned(did)
-    if banned:
-        return jsonify({"ok": False, "valid": False, "message": "Banned from server"}), 403
+    try:
+        if discord_is_banned(did):
+            return fail(403, "Banned from server")
+    except Exception:
+        return fail(500, "Ban check failed")
 
-    member = discord_member(did)
+    try:
+        member = discord_member(did)
+    except Exception:
+        return fail(500, "Member lookup failed")
+
     if "roles" not in member:
-        return jsonify({"ok": False, "valid": False, "message": "Not in server"}), 404
+        code = member.get("status_code")
+        if code == 404:
+            return fail(404, "Not in server")
+        return fail(502, f"Member lookup error (status {code})")
 
-    has_role = discord_has_role(member) or global_override or bool(admin_overrides.get(did))
+    has_role = False
+    try:
+        has_role = discord_has_role(member) or global_override or bool(admin_overrides.get(did))
+    except Exception:
+        has_role = False
+
     if not has_role:
-        return jsonify({"ok": False, "valid": False, "message": "Role missing"}), 403
+        return fail(403, "Role missing")
 
-    # Validate key
-    store = load_keys()
+    try:
+        store = load_keys()
+    except Exception:
+        return fail(500, "Key store load failed")
+
     entry = store.get(did)
     if not entry:
-        return jsonify({"ok": False, "valid": False, "message": "No key issued for this user"}), 404
-
+        return fail(404, "No key issued for this user")
     if entry.get("used"):
-        return jsonify({"ok": False, "valid": False, "message": "Key already used"}), 410
+        return fail(410, "Key already used")
+    if str(entry.get("key")) != key:
+        return fail(400, "Incorrect key")
 
-    if str(entry.get("key")) != str(key):
-        return jsonify({"ok": False, "valid": False, "message": "Incorrect key"}), 400
-
-    # Consume key
-    entry["used"] = True
-    entry["used_at"] = now_ts()
-    audit = entry.get("audit", [])
-    audit.append({"ts": now_ts(), "event": "consumed"})
-    entry["audit"] = audit
-    store[did] = entry
-    save_keys(store)
+    try:
+        entry["used"] = True
+        entry["used_at"] = now_ts()
+        audit = entry.get("audit", [])
+        audit.append({"ts": now_ts(), "event": "consumed"})
+        entry["audit"] = audit
+        store[did] = entry
+        save_keys(store)
+    except Exception:
+        return fail(500, "Failed to consume key")
 
     return jsonify({"ok": True, "valid": True, "message": "Key valid and consumed"}), 200
 
