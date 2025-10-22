@@ -1,13 +1,4 @@
 # app.py
-# Complete, tested drop-in for verifier:
-# - Signed OAuth state (no session dependency during redirect)
-# - Consolidated cookie config (SameSite=None, Secure, HttpOnly)
-# - Favicon handler, robust logging, minimal external deps
-# - Emits Set-Cookie on callback; logs response headers for debug
-# Env required: SECRET_KEY, SESSION_COOKIE_DOMAIN, BASE_URL,
-# DISCORD_CLIENT_ID, DISCORD_CLIENT_SECRET, DISCORD_REDIRECT,
-# DISCORD_GUILD_ID, DISCORD_ROLE_ID, DISCORD_BOT_TOKEN, OWNER_ID
-
 import os
 import time
 import secrets
@@ -36,10 +27,10 @@ app = Flask(__name__, static_folder="static")
 app.secret_key = os.environ.get("SECRET_KEY", secrets.token_hex(32))
 app.permanent_session_lifetime = timedelta(days=1)
 
-# Consolidated cookie config (one place only)
+# Consolidated cookie config — set SESSION_COOKIE_DOMAIN to your parent domain (leading dot)
 app.config.update(
     SESSION_COOKIE_NAME=os.environ.get("SESSION_COOKIE_NAME", "session"),
-    SESSION_COOKIE_DOMAIN=os.environ.get("SESSION_COOKIE_DOMAIN", ""),  # must set to parent domain like ".gaming-mods.com"
+    SESSION_COOKIE_DOMAIN=os.environ.get("SESSION_COOKIE_DOMAIN", ".gaming-mods.com"),
     SESSION_COOKIE_SECURE=True,
     SESSION_COOKIE_SAMESITE="None",
     SESSION_COOKIE_HTTPONLY=True,
@@ -50,13 +41,11 @@ BASE_URL = os.environ.get("BASE_URL", "https://gaming-mods.com").rstrip("/")
 IONOS_INDEX = f"{BASE_URL}/index.html"
 IONOS_GAMES = f"{BASE_URL}/games.html"
 
-# Allow only the static site origin to call APIs with credentials
 CORS(app, origins=[BASE_URL], supports_credentials=True)
 
-# Discord / storage config
 DISCORD_CLIENT_ID = os.environ.get("DISCORD_CLIENT_ID", "")
 DISCORD_CLIENT_SECRET = os.environ.get("DISCORD_CLIENT_SECRET", "")
-DISCORD_REDIRECT = os.environ.get("DISCORD_REDIRECT", "").strip()  # should match Discord dev portal
+DISCORD_REDIRECT = os.environ.get("DISCORD_REDIRECT", "").strip()
 DISCORD_GUILD_ID = os.environ.get("DISCORD_GUILD_ID", "")
 DISCORD_ROLE_ID = os.environ.get("DISCORD_ROLE_ID", "")
 DISCORD_BOT_TOKEN = os.environ.get("DISCORD_BOT_TOKEN", "")
@@ -124,7 +113,7 @@ def _safe_json(resp: requests.Response) -> dict:
     except Exception:
         return {}
 
-# Signed state helpers (no session dependency)
+# Signed state helpers
 def sign_state(raw: str, secret: str) -> str:
     mac = hmac.new(secret.encode(), raw.encode(), hashlib.sha256).digest()
     return base64.urlsafe_b64encode(raw.encode() + b"." + mac).decode()
@@ -142,7 +131,7 @@ def verify_state_token(token: str, secret: str, max_age: int = 300) -> bool:
     except Exception:
         return False
 
-# Discord helpers
+# Discord API helpers
 def discord_exchange_token(code: str, redirect_uri: str) -> dict:
     url = "https://discord.com/api/oauth2/token"
     data = {
@@ -249,7 +238,7 @@ def handle_exception(e):
     logging.exception("Unhandled exception")
     return jsonify({"ok": False, "error": str(e)}), 500
 
-# favicon
+# Serve favicon if present
 @app.route("/favicon.ico")
 def favicon():
     try:
@@ -280,19 +269,22 @@ def login_discord():
 @app.route("/login/browser-fallback")
 def browser_fallback():
     verifier_login = (request.url_root.rstrip("/") + "/login/discord")
-    fallback_html = f"""
+    # Use .format to avoid f-string brace conflicts inside JS block
+    fallback_html = """
     <!doctype html>
-    <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Open in browser</title></head>
-    <body style="font-family:system-ui,Arial,sans-serif;display:flex;min-height:100vh;align-items:center;justify-content:center;margin:0;background:#0b0b0b;color:#eee">
-      <div style="max-width:520px;padding:28px;border-radius:12px;background:#0f0f0f;border:1px solid rgba(255,255,255,0.06);text-align:center;">
-        <h1 style="margin:0 0 12px;font-size:20px">Open in browser to continue</h1>
-        <p style="color:#bbb;margin:0 0 18px">Your device opened the Discord app. To complete login in your browser, tap the button below.</p>
-        <button id="retry" style="appearance:none;border:0;padding:12px 18px;border-radius:8px;background:#ffb000;color:#000;font-weight:700;cursor:pointer">Retry login in browser</button>
-        <p style="font-size:13px;color:#999;margin-top:12px">If redirected again into the Discord app, return here and use your OS “Open in browser”.</p>
-      </div>
-      <script>document.getElementById('retry').addEventListener('click',function(){window.location.href='{verifier_login}';});</script>
-    </body></html>
-    """
+    <html>
+      <head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Open in browser</title></head>
+      <body style="font-family:system-ui,Arial,sans-serif;display:flex;min-height:100vh;align-items:center;justify-content:center;margin:0;background:#0b0b0b;color:#eee">
+        <div style="max-width:520px;padding:28px;border-radius:12px;background:#0f0f0f;border:1px solid rgba(255,255,255,0.06);text-align:center;">
+          <h1 style="margin:0 0 12px;font-size:20px">Open in browser to continue</h1>
+          <p style="color:#bbb;margin:0 0 18px">Your device opened the Discord app. To complete login in your browser, tap the button below.</p>
+          <button id="retry" style="appearance:none;border:0;padding:12px 18px;border-radius:8px;background:#ffb000;color:#000;font-weight:700;cursor:pointer">Retry login in browser</button>
+          <p style="font-size:13px;color:#999;margin-top:12px">If redirected again into the Discord app, return here and use your OS “Open in browser”.</p>
+        </div>
+        <script>document.getElementById('retry').addEventListener('click', function(){ window.location.href = "{0}"; });</script>
+      </body>
+    </html>
+    """.format(verifier_login)
     return fallback_html, 200, {"Content-Type": "text/html; charset=utf-8"}
 
 @app.route("/login/discord/callback")
@@ -329,7 +321,6 @@ def login_callback():
     is_member = "roles" in member_resp
     has_role = bool(is_member and discord_has_role(member_resp))
 
-    # Persist session (this response emits Set-Cookie)
     session.permanent = True
     session["user"] = {
         "id": did,
@@ -352,7 +343,6 @@ def login_callback():
     if not is_member:
         return render_template_string("<h2>Join required</h2><p>Please join the Discord server and try again.</p><p><a href='{{home}}'>Return</a></p>", home=BASE_URL), 403
     if not has_role:
-        # role missing, still set cookie so front-end can show role-missing state
         resp = make_response(render_template_string("<h2>Role missing</h2><p>Membership verified but required role missing.</p><p><a href='{{home}}'>Continue</a></p>", home=BASE_URL))
         logging.info("Role missing; response headers BEFORE send: %s", dict(resp.headers))
         return resp
@@ -528,13 +518,13 @@ def override_user(did):
 def remove_role_now(did):
     if not require_owner():
         return jsonify({"ok": False, "message": "Forbidden"}), 403
-    success = discord_remove_role(did)
+    success = discordremoverole(did)
     return jsonify({"ok": success, "discord_id": did}), (200 if success else 500)
 
 @app.route("/health")
 def health():
     return jsonify({"ok": True, "ts": now_ts()}), 200
 
-if __name__ == "__main__":
+if name == "main":
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port, debug=False)
