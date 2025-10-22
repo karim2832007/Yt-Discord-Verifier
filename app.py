@@ -31,12 +31,12 @@ app.permanent_session_lifetime = timedelta(days=1)
 
 # Consolidated cookie config — set SESSION_COOKIE_DOMAIN env to your parent domain
 app.config.update(
-    SESSION_COOKIE_NAME=os.environ.get("SESSION_COOKIE_NAME", "session"),
-    SESSION_COOKIE_DOMAIN=os.environ.get("SESSION_COOKIE_DOMAIN", ".gaming-mods.com"),
-    SESSION_COOKIE_SECURE=True,
-    SESSION_COOKIE_SAMESITE="None",
-    SESSION_COOKIE_HTTPONLY=True,
-    PROPAGATE_EXCEPTIONS=True,
+    SESSION_COOKIE_NAME = os.environ.get("SESSION_COOKIE_NAME", "session"),
+    SESSION_COOKIE_DOMAIN = os.environ.get("SESSION_COOKIE_DOMAIN", ".gaming-mods.com"),
+    SESSION_COOKIE_SECURE = True,
+    SESSION_COOKIE_SAMESITE = "None",
+    SESSION_COOKIE_HTTPONLY = True,
+    PROPAGATE_EXCEPTIONS = True,
 )
 
 # ----------------- SITE / ORIGINS -----------------
@@ -92,7 +92,7 @@ def load_keys() -> Dict[str, Any]:
         with open(KEYS_FILE) as f:
             return json.load(f)
     except Exception:
-        logging.exception("load_keys_failed")
+        logging.exception("load_keys failed")
         return {}
 
 def save_keys(store: Dict[str, Any]):
