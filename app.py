@@ -1,4 +1,18 @@
 # app.py
+"""
+Full Flask backend for verifier (designed to work with static IONOS homepage).
+Features:
+- Discord OAuth (identify) with safe token exchange and state signing
+- Session-based login (SameSite=None; Secure) so IONOS can call /api/me with credentials
+- /api/me to report login status for static site toggle
+- One-active-key-per-user generate/invalidate flow: /generate_key (GET) and /use_key (POST)
+- /status/<did> check for role presence, admin/owner overrides
+- Owner-only override and role removal endpoints
+- Removes "copy your Discord ID" intermediate page (user is sent straight to index after login)
+Environment variables required:
+  SECRET_KEY, SESSION_COOKIE_DOMAIN, BASE_URL, DISCORD_CLIENT_ID, DISCORD_CLIENT_SECRET,
+  DISCORD_REDIRECT (optional), DISCORD_GUILD_ID, DISCORD_ROLE_ID, DISCORD_BOT_TOKEN, OWNER_ID
+"""
 import os
 import time
 import secrets
@@ -6,16 +20,18 @@ import hmac
 import hashlib
 import base64
 import logging
+import json
+import re
 from datetime import timedelta
+from typing import Dict, Any
+
 import requests
 from flask import (
     Flask, redirect, request, session, jsonify,
-    render_template, render_template_string, url_for
+    render_template_string, url_for
 )
-from dotenv import load_dotenv
 from flask_cors import CORS
-import json
-import re
+from dotenv import load_dotenv
 
 # -----------------------------------------------------------------------------
 # Load environment and configure app
@@ -25,53 +41,55 @@ app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", secrets.token_hex(32))
 app.permanent_session_lifetime = timedelta(days=1)
 
-# Cookie config - adjust SESSION_COOKIE_DOMAIN if you deploy under a different domain
+# Cookie config for cross-site usage (IONOS static site -> verifier)
 SESSION_COOKIE_DOMAIN = os.environ.get("SESSION_COOKIE_DOMAIN", ".gaming-mods.com")
 app.config.update(
     SESSION_COOKIE_DOMAIN=SESSION_COOKIE_DOMAIN,
     SESSION_COOKIE_SECURE=True,
-    SESSION_COOKIE_SAMESITE="None",
+    SESSION_COOKIE_SAMESITE="None",  # required to send cookies from static IONOS -> verifier
     PROPAGATE_EXCEPTIONS=True,
 )
 
-IONOS_BASE   = os.environ.get("BASE_URL", "https://gaming-mods.com").rstrip("/")
-IONOS_INDEX  = f"{IONOS_BASE}/index.html"
-IONOS_ADMIN  = f"{IONOS_BASE}/admin.html"
-IONOS_GAMES  = f"{IONOS_BASE}/games.html"
-IONOS_DONATE = f"{IONOS_BASE}/donate.html"
-IONOS_PRIVACY= f"{IONOS_BASE}/privacy.html"
+# Base / static site URLs
+BASE_URL = os.environ.get("BASE_URL", "https://gaming-mods.com").rstrip("/")
+IONOS_INDEX = f"{BASE_URL}/index.html"
+IONOS_GAMES = f"{BASE_URL}/games.html"
+IONOS_DONATE = f"{BASE_URL}/donate.html"
+IONOS_PRIVACY = f"{BASE_URL}/privacy.html"
+IONOS_ADMIN = f"{BASE_URL}/admin.html"
 
-# Allow the IONOS domain to call APIs with credentials if you keep static there
-CORS(app, origins=[IONOS_BASE], supports_credentials=True)
+# Allow the IONOS origin to call APIs with credentials
+CORS(app, origins=[BASE_URL], supports_credentials=True)
 
 # -----------------------------------------------------------------------------
-# Discord & Owner settings (required env vars)
+# Discord & owner settings
 # -----------------------------------------------------------------------------
-DISCORD_CLIENT_ID     = os.environ.get("DISCORD_CLIENT_ID", "")
+DISCORD_CLIENT_ID = os.environ.get("DISCORD_CLIENT_ID", "")
 DISCORD_CLIENT_SECRET = os.environ.get("DISCORD_CLIENT_SECRET", "")
-DISCORD_GUILD_ID      = os.environ.get("DISCORD_GUILD_ID", "")
-DISCORD_ROLE_ID       = os.environ.get("DISCORD_ROLE_ID", "")
-DISCORD_BOT_TOKEN     = os.environ.get("DISCORD_BOT_TOKEN", "")
-OWNER_ID              = os.environ.get("OWNER_ID", "1329817290052734980")
-DISCORD_REDIRECT      = os.environ.get("DISCORD_REDIRECT", "").strip()
+DISCORD_REDIRECT = os.environ.get("DISCORD_REDIRECT", "").strip()
+DISCORD_GUILD_ID = os.environ.get("DISCORD_GUILD_ID", "")
+DISCORD_ROLE_ID = os.environ.get("DISCORD_ROLE_ID", "")
+DISCORD_BOT_TOKEN = os.environ.get("DISCORD_BOT_TOKEN", "")
+OWNER_ID = os.environ.get("OWNER_ID", "")
 
 # -----------------------------------------------------------------------------
-# State persistence & overrides
+# State / overrides persistence
 # -----------------------------------------------------------------------------
-global_override = False
-admin_overrides = {}  # {did: {...}}
-login_history = []
 STATE_FILE = "override_state.json"
+global_override = False
+admin_overrides: Dict[str, Dict[str, Any]] = {}
+login_history = []
+
+logging.basicConfig(level=logging.INFO)
+
 
 def save_state():
     try:
         with open(STATE_FILE, "w") as f:
-            json.dump({
-                "global_override": global_override,
-                "admin_overrides": admin_overrides
-            }, f)
+            json.dump({"global_override": global_override, "admin_overrides": admin_overrides}, f)
     except Exception:
-        logging.exception("Failed to save state")
+        logging.exception("Failed to save override state")
+
 
 def load_state():
     global global_override, admin_overrides
@@ -82,24 +100,27 @@ def load_state():
             global_override = data.get("global_override", False)
             admin_overrides = data.get("admin_overrides", {})
     except Exception:
-        logging.exception("Failed to load state")
+        logging.exception("Failed to load override state")
+
 
 load_state()
 
 # -----------------------------------------------------------------------------
-# Helpers
+# Helpers: state signing, time, validation
 # -----------------------------------------------------------------------------
-STATE_TTL = 15 * 60
-logging.basicConfig(level=logging.INFO)
+STATE_TTL = 15 * 60  # seconds for OAuth state token
+KEY_TTL_SECONDS = int(os.environ.get("KEY_TTL_SECONDS", "600"))  # default key TTL
 
 def now_ts() -> int:
     return int(time.time())
+
 
 def sign_state(payload: str) -> str:
     key = app.secret_key.encode()
     sig = hmac.new(key, payload.encode(), hashlib.sha256).digest()
     token = f"{payload}|{base64.urlsafe_b64encode(sig).decode()}"
     return base64.urlsafe_b64encode(token.encode()).decode()
+
 
 def verify_state(token: str) -> bool:
     try:
@@ -115,26 +136,30 @@ def verify_state(token: str) -> bool:
     except Exception:
         return False
 
+
 def make_state() -> str:
     payload = f"{secrets.token_hex(8)}.{now_ts()}"
     return sign_state(payload)
+
+
+def is_valid_discord_id(did: str) -> bool:
+    return bool(re.fullmatch(r"\d{1,24}", did))
+
 
 def require_owner() -> bool:
     user = session.get("user")
     return bool(user and str(user.get("id")) == str(OWNER_ID))
 
-def _safe_json(resp):
+# -----------------------------------------------------------------------------
+# Discord API helpers with robust exchange/backoff
+# -----------------------------------------------------------------------------
+def _safe_json(resp: requests.Response) -> dict:
     try:
         return resp.json()
     except Exception:
         return {}
 
-def is_valid_discord_id(did: str) -> bool:
-    return bool(re.fullmatch(r"\d{1,24}", did))
 
-# -----------------------------------------------------------------------------
-# Discord API helpers
-# -----------------------------------------------------------------------------
 def discord_exchange_token(code: str, redirect_uri: str) -> dict:
     url = "https://discord.com/api/oauth2/token"
     data = {
@@ -147,21 +172,21 @@ def discord_exchange_token(code: str, redirect_uri: str) -> dict:
     headers = {
         "Content-Type": "application/x-www-form-urlencoded",
         "Accept": "application/json",
-        "User-Agent": "GamingMods-Verifier/1.0 (+https://gaming-mods.com)"
+        "User-Agent": "GamingMods-Verifier/1.0 (+https://gaming-mods.com)",
     }
 
     MAX_ATTEMPTS = 4
     BACKOFF_BASE = 0.5
-    MAX_IN_REQUEST_SLEEP = 5  # seconds
+    MAX_SLEEP = 5
 
     for attempt in range(1, MAX_ATTEMPTS + 1):
         try:
             resp = requests.post(url, data=data, headers=headers, timeout=15)
         except requests.RequestException as exc:
-            logging.warning("discord_exchange_token network error (attempt %d): %s", attempt, exc)
+            logging.warning("Token exchange network error (attempt %d): %s", attempt, exc)
             if attempt == MAX_ATTEMPTS:
                 return {"error": "network_error", "message": str(exc)}
-            time.sleep(min(BACKOFF_BASE * (2 ** (attempt - 1)), MAX_IN_REQUEST_SLEEP))
+            time.sleep(min(BACKOFF_BASE * (2 ** (attempt - 1)), MAX_SLEEP))
             continue
 
         if resp.status_code == 429:
@@ -170,43 +195,29 @@ def discord_exchange_token(code: str, redirect_uri: str) -> dict:
                 retry_after = int(resp.headers.get("Retry-After") or resp.headers.get("retry-after") or 0)
             except Exception:
                 retry_after = None
-            logging.warning("discord_exchange_token received 429 (attempt %d). Retry-After: %s", attempt, retry_after)
-
-            if retry_after and retry_after > MAX_IN_REQUEST_SLEEP:
-                return {
-                    "error": "rate_limited",
-                    "status": 429,
-                    "retry_after": retry_after,
-                    "body": resp.text,
-                    "json": _safe_json(resp)
-                }
-
+            logging.warning("Token exchange 429 (attempt %d), retry_after=%s", attempt, retry_after)
             sleep_for = retry_after if (retry_after and retry_after > 0) else (BACKOFF_BASE * (2 ** (attempt - 1)))
-            sleep_for = min(sleep_for, MAX_IN_REQUEST_SLEEP)
+            sleep_for = min(sleep_for, MAX_SLEEP)
             if attempt == MAX_ATTEMPTS:
-                return {"error": "token_exchange_failed", "status": 429, "body": resp.text, "json": _safe_json(resp)}
+                return {"error": "rate_limited", "status": 429, "retry_after": retry_after, "body": resp.text, "json": _safe_json(resp)}
             time.sleep(sleep_for)
             continue
 
         if 500 <= resp.status_code < 600:
-            logging.warning("discord_exchange_token server error %s (attempt %d)", resp.status_code, attempt)
+            logging.warning("Discord server error %s (attempt %d)", resp.status_code, attempt)
             if attempt == MAX_ATTEMPTS:
                 return {"error": "token_exchange_failed", "status": resp.status_code, "body": resp.text, "json": _safe_json(resp)}
-            time.sleep(min(BACKOFF_BASE * (2 ** (attempt - 1)), MAX_IN_REQUEST_SLEEP))
+            time.sleep(min(BACKOFF_BASE * (2 ** (attempt - 1)), MAX_SLEEP))
             continue
 
-        try:
-            payload = resp.json()
-        except Exception:
-            payload = {}
-
+        payload = _safe_json(resp)
         if resp.status_code != 200:
-            logging.warning("discord_exchange_token bad status %s: %s", resp.status_code, resp.text)
+            logging.warning("Token exchange failed %s: %s", resp.status_code, resp.text)
             return {"error": "token_exchange_failed", "status": resp.status_code, "body": resp.text, "json": payload}
-
         return payload
 
     return {"error": "token_exchange_failed", "status": "max_retries_exceeded"}
+
 
 def discord_get_user(token: str) -> dict:
     try:
@@ -217,28 +228,28 @@ def discord_get_user(token: str) -> dict:
         )
     except Exception as e:
         return {"error": "user_fetch_failed", "message": str(e)}
-    try:
-        data = resp.json()
-    except Exception:
-        data = {}
+    data = _safe_json(resp)
     if resp.status_code != 200:
         return {"error": "user_fetch_failed", "status": resp.status_code, "body": resp.text, "json": data}
     return data
+
 
 def discord_member(did: str) -> dict:
     if not DISCORD_GUILD_ID or not DISCORD_BOT_TOKEN:
         return {"status_code": 400, "error": "missing_guild_or_bot_token"}
     url = f"https://discord.com/api/guilds/{DISCORD_GUILD_ID}/members/{did}"
-    resp = requests.get(url, headers={"Authorization": f"Bot {DISCORD_BOT_TOKEN}"}, timeout=15)
+    try:
+        resp = requests.get(url, headers={"Authorization": f"Bot {DISCORD_BOT_TOKEN}"}, timeout=15)
+    except Exception as e:
+        return {"status_code": 500, "error": str(e)}
     if resp.status_code == 200:
-        try:
-            return resp.json()
-        except Exception:
-            return {"status_code": resp.status_code, "error": resp.text}
+        return _safe_json(resp)
     return {"status_code": resp.status_code, "error": resp.text}
+
 
 def discord_has_role(member: dict) -> bool:
     return str(DISCORD_ROLE_ID) in [str(r) for r in member.get("roles", [])]
+
 
 def discord_add_role(did: str) -> bool:
     if not DISCORD_GUILD_ID or not DISCORD_BOT_TOKEN or not DISCORD_ROLE_ID:
@@ -247,12 +258,14 @@ def discord_add_role(did: str) -> bool:
     resp = requests.put(url, headers={"Authorization": f"Bot {DISCORD_BOT_TOKEN}"}, timeout=15)
     return resp.status_code in (200, 204)
 
+
 def discord_remove_role(did: str) -> bool:
     if not DISCORD_GUILD_ID or not DISCORD_BOT_TOKEN or not DISCORD_ROLE_ID:
         return False
     url = f"https://discord.com/api/guilds/{DISCORD_GUILD_ID}/members/{did}/roles/{DISCORD_ROLE_ID}"
     resp = requests.delete(url, headers={"Authorization": f"Bot {DISCORD_BOT_TOKEN}"}, timeout=15)
     return resp.status_code in (200, 204)
+
 
 def should_assign_on_login(did: str) -> bool:
     return global_override or bool(admin_overrides.get(did, False))
@@ -266,12 +279,27 @@ def handle_exception(e):
     return jsonify({"ok": False, "error": str(e)}), 500
 
 # -----------------------------------------------------------------------------
-# Front-end: server-side rendering for index, and redirects for other pages
+# Front-end redirects (IONOS static site remains authoritative)
 # -----------------------------------------------------------------------------
 @app.route("/")
-def index():
-    # Render your homepage via Jinja so buttons are correct based on session
-    return render_template("index.html")
+def serve_index():
+    return redirect(IONOS_INDEX)
+
+
+@app.route("/games")
+def serve_games():
+    return redirect(IONOS_GAMES)
+
+
+@app.route("/privacy")
+def serve_privacy():
+    return redirect(IONOS_PRIVACY)
+
+
+@app.route("/donate")
+def serve_donate():
+    return redirect(IONOS_DONATE)
+
 
 @app.route("/admin")
 def serve_admin():
@@ -279,17 +307,6 @@ def serve_admin():
         return "Forbidden", 403
     return redirect(IONOS_ADMIN)
 
-@app.route("/games")
-def serve_games():
-    return redirect(IONOS_GAMES)
-
-@app.route("/privacy")
-def serve_privacy():
-    return redirect(IONOS_PRIVACY)
-
-@app.route("/donate")
-def serve_donate():
-    return redirect(IONOS_DONATE)
 
 @app.route("/admin/logins")
 def admin_logins():
@@ -298,7 +315,7 @@ def admin_logins():
     return jsonify({"ok": True, "logins": login_history}), 200
 
 # -----------------------------------------------------------------------------
-# OAuth endpoints
+# OAuth endpoints (no "copy ID" page)
 # -----------------------------------------------------------------------------
 @app.route("/login/discord")
 def login_discord():
@@ -313,10 +330,10 @@ def login_discord():
     )
     return redirect(auth_url)
 
+
 def _discord_callback():
-    # Removed the "copy your Discord ID" page entirely.
     state = request.args.get("state", "")
-    code  = request.args.get("code", "")
+    code = request.args.get("code", "")
 
     if not state or not verify_state(state):
         return "Invalid or expired state", 400
@@ -327,46 +344,13 @@ def _discord_callback():
     token_resp = discord_exchange_token(code, redirect_uri)
 
     if isinstance(token_resp, dict) and token_resp.get("error") == "rate_limited":
-        retry_after  = token_resp.get("retry_after", None)
+        retry_after = token_resp.get("retry_after")
         body_preview = (token_resp.get("body") or "")[:1000]
         return render_template_string(
-            """
-            <!DOCTYPE html>
-            <html lang="en">
-            <head>
-            <meta charset="utf-8"/>
-            <title>Discord rate limited</title>
-            <meta name="viewport" content="width=device-width,initial-scale=1"/>
-            <style>
-              body {background:#0b0b0b;color:#eee;font-family:Inter,SegoeUI,Arial;margin:0;display:flex;align-items:center;justify-content:center;height:100vh}
-              .card {max-width:720px;padding:28px;border-radius:12px;background:linear-gradient(180deg,#0f0f0f,#070707);box-shadow:0 20px 50px rgba(0,0,0,0.7);text-align:center}
-              h1 {color:#f0c851;margin:0 0 8px;font-size:20px}
-              p {color:#ccc;margin:8px 0 12px}
-              .meta {font-family:monospace;color:#bbb;background:#080808;padding:10px;border-radius:8px;text-align:left;max-height:160px;overflow:auto}
-              .actions {margin-top:14px}
-              a.button {display:inline-block;padding:10px 14px;border-radius:10px;background:#d4af37;color:#070707;font-weight:700;text-decoration:none;margin:0 6px}
-              a.link {color:#9fb8ff;text-decoration:underline}
-            </style>
-            </head>
-            <body>
-              <div class="card">
-                <h1>Discord is rate limiting token exchanges</h1>
-                <p>Please wait and try again. If the problem persists, try again later.</p>
-                <div class="meta"><strong>Retry-After:</strong> {{ retry_after }} seconds
-                <br/><br/><strong>Server response (truncated):</strong>
-                <pre>{{ body_preview }}</pre></div>
-                <div class="actions">
-                  <a class="button" href="{{ retry_link }}">Retry now</a>
-                  <a class="link" href="{{ index_link }}">Return to site</a>
-                </div>
-              </div>
-            </body>
-            </html>
-            """,
-            retry_after=retry_after,
-            body_preview=body_preview,
-            retry_link=request.base_url + "?" + request.query_string.decode(),
-            index_link=url_for("index")
+            "<!doctype html><html><head><meta charset=utf-8><title>Discord rate limited</title></head><body>"
+            "<h2>Discord rate limited</h2><p>Retry after: {{retry_after}}</p><pre>{{body_preview}}</pre>"
+            "<p><a href='{{home}}'>Return</a></p></body></html>",
+            retry_after=retry_after, body_preview=body_preview, home=IONOS_INDEX
         ), 429
 
     if isinstance(token_resp, dict) and token_resp.get("error"):
@@ -374,23 +358,10 @@ def _discord_callback():
         brief = json.dumps({k: token_resp.get(k) for k in ("error", "status") if k in token_resp})
         body_preview = (token_resp.get("body") or "")[:800]
         return render_template_string(
-            """
-            <!DOCTYPE html>
-            <html lang="en">
-            <head><meta charset="utf-8"/><title>Login error</title>
-            <meta name="viewport" content="width=device-width,initial-scale=1"/></head>
-            <body style="background:#070707;color:#eee;font-family:Inter,SegoeUI,Arial;display:flex;align-items:center;justify-content:center;height:100vh;margin:0">
-              <div style="max-width:720px;padding:24px;border-radius:10px;background:#0c0c0c">
-                <h2 style="color:#f0c851;margin:0 0 8px">Login failed</h2>
-                <p style="color:#ccc">Token exchange failed. Details:</p>
-                <pre style="background:#080808;color:#ddd;padding:10px;border-radius:8px;overflow:auto">{{ brief }}</pre>
-                <pre style="background:#020202;color:#ddd;padding:10px;border-radius:8px;overflow:auto">{{ body_preview }}</pre>
-                <p style="margin-top:12px"><a style="color:#d4af37" href="{{ index_link }}">Return to site</a></p>
-              </div>
-            </body>
-            </html>
-            """,
-            brief=brief, body_preview=body_preview, index_link=url_for("index")
+            "<!doctype html><html><head><meta charset=utf-8><title>Login error</title></head><body>"
+            "<h2>Login failed</h2><pre>{{brief}}</pre><pre>{{body_preview}}</pre>"
+            "<p><a href='{{home}}'>Return</a></p></body></html>",
+            brief=brief, body_preview=body_preview, home=IONOS_INDEX
         ), 400
 
     access_token = token_resp.get("access_token")
@@ -410,7 +381,6 @@ def _discord_callback():
     except Exception:
         logging.exception("Role assignment failed")
 
-    # Set session and redirect to index (server-side rendered). No ID-copy page.
     session.permanent = True
     session["user"] = {
         "id": did,
@@ -419,19 +389,32 @@ def _discord_callback():
         "ts": now_ts()
     }
     login_history.append(session["user"])
-    return redirect(url_for("index"))
+    # Redirect straight back to the IONOS homepage (static); session cookie set for verifier domain
+    return redirect(IONOS_INDEX)
+
 
 @app.route("/login/discord/callback")
 def discord_callback_login():
     return _discord_callback()
+
 
 @app.route("/discord/callback")
 def discord_callback_plain():
     return _discord_callback()
 
 # -----------------------------------------------------------------------------
-# Session / Portal / Logout / Status
+# API: session info, logout, status
 # -----------------------------------------------------------------------------
+@app.route("/api/me")
+def api_me():
+    user = session.get("user")
+    return jsonify({
+        "logged_in": bool(user),
+        "user_id": (user or {}).get("id"),
+        "username": (user or {}).get("username"),
+    }), 200
+
+
 @app.route("/portal/me")
 def portal_me():
     user = session.get("user")
@@ -439,14 +422,15 @@ def portal_me():
         return jsonify({"ok": False, "message": "Not logged in"}), 401
     return jsonify({"ok": True, "user": user}), 200
 
+
 @app.route("/logout")
 def logout():
     session.clear()
-    return redirect(url_for("index"))
+    return redirect(IONOS_INDEX)
+
 
 @app.route("/status/<did>")
 def status(did):
-    # Validate ID even if client restricts input
     if not is_valid_discord_id(did):
         return jsonify({"ok": False, "role_granted": False, "message": "Invalid ID format"}), 400
 
@@ -461,42 +445,35 @@ def status(did):
         return jsonify({"ok": True, "role_granted": has, "message": ("Role present" if has else "Role missing")}), 200
     return jsonify({"ok": False, "role_granted": False, "message": f"Member lookup error (status {member.get('status_code')})"}), 404
 
+
 @app.route("/health")
 def health():
     return jsonify({"ok": True, "ts": now_ts()}), 200
 
 # -----------------------------------------------------------------------------
-# Generate-key system: one active key per user, invalidated on use
+# Key generation system: one active key per user, invalidated on use
 # -----------------------------------------------------------------------------
-# In-memory store. Replace with DB for persistence in production.
-user_keys = {}  # { did: { "key": str, "used": bool, "ts": int, "expires_at": int } }
-KEY_TTL_SECONDS = int(os.environ.get("KEY_TTL_SECONDS", "600"))  # default 10 minutes
+# In-memory store; replace with DB for persistence across restarts
+user_keys: Dict[str, Dict[str, Any]] = {}
+
 
 def prune_expired_keys():
     now = now_ts()
     expired = [did for did, rec in user_keys.items() if rec.get("expires_at", 0) <= now or rec.get("used")]
     for did in expired:
-        # If used or expired, drop so user can generate a new one
-        rec = user_keys.get(did)
-        if rec and (rec.get("used") or rec.get("expires_at", 0) <= now):
-            user_keys.pop(did, None)
+        user_keys.pop(did, None)
+
 
 def generate_key_for(did: str) -> str:
     prune_expired_keys()
-    # If an active key exists and not used, return the same without regenerating
     rec = user_keys.get(did)
     now = now_ts()
     if rec and not rec["used"] and rec["expires_at"] > now:
         return rec["key"]
-    # New key
-    key = secrets.token_hex(16)  # 32-char random
-    user_keys[did] = {
-        "key": key,
-        "used": False,
-        "ts": now,
-        "expires_at": now + KEY_TTL_SECONDS
-    }
+    key = secrets.token_hex(16)  # 32 hex chars
+    user_keys[did] = {"key": key, "used": False, "ts": now, "expires_at": now + KEY_TTL_SECONDS}
     return key
+
 
 def use_key_for(did: str, key: str) -> bool:
     rec = user_keys.get(did)
@@ -508,31 +485,36 @@ def use_key_for(did: str, key: str) -> bool:
         return True
     return False
 
+
 @app.route("/generate_key")
 def generate_key():
     user = session.get("user")
     if not user:
-        # If not logged in, go to login
         return redirect(url_for("login_discord"))
     did = str(user.get("id"))
     if not is_valid_discord_id(did):
         return jsonify({"ok": False, "message": "Invalid session user ID"}), 400
-    # Optional: Only generate if user currently has the role
-    member = discord_member(did)
-    if "roles" in member and not discord_has_role(member) and not global_override and not admin_overrides.get(did):
-        return render_template_string(
-            """
-            <!DOCTYPE html><html><body style="background:#111;color:#eee;font-family:Inter,SegoeUI,Arial;padding:24px">
-            <h2>Access denied</h2>
-            <p>Your Discord account does not have the required role to generate a key.</p>
-            <p><a style="color:#d4af37" href="{{ home }}">Return to home</a></p>
-            </body></html>
-            """,
-            home=url_for("index")
-        ), 403
+
+    # Optionally enforce role possession unless overridden
+    if not (global_override or admin_overrides.get(did)):
+        member = discord_member(did)
+        if "roles" in member and not discord_has_role(member):
+            return render_template_string(
+                "<!doctype html><html><head><meta charset=utf-8><title>Access denied</title></head><body>"
+                "<h2>Access denied</h2><p>Your Discord account does not have the required role to generate a key.</p>"
+                "<p><a href='{{home}}'>Return</a></p></body></html>",
+                home=IONOS_INDEX
+            ), 403
 
     key = generate_key_for(did)
-    return render_template("key.html", key=key, did=did, ttl=KEY_TTL_SECONDS)
+    return render_template_string(
+        "<!doctype html><html><head><meta charset=utf-8><title>Your Unlock Key</title></head><body>"
+        "<h1>Your Cheat Unlock Key</h1><p>Discord ID: <code>{{did}}</code></p><p><code>{{key}}</code></p>"
+        "<p>This key expires in {{ttl}} seconds. Once used it will be invalidated.</p>"
+        "<p><a href='{{home}}'>Return to site</a></p></body></html>",
+        did=did, key=key, ttl=KEY_TTL_SECONDS, home=IONOS_INDEX
+    )
+
 
 @app.route("/use_key", methods=["POST"])
 def use_key():
@@ -543,7 +525,7 @@ def use_key():
     if not is_valid_discord_id(did) or not re.fullmatch(r"[0-9a-f]{32}", key):
         return jsonify({"ok": False, "message": "Invalid input"}), 400
 
-    # Validate role at use-time as well (optional but recommended)
+    # Validate role at use-time as well (unless overridden)
     if not (global_override or admin_overrides.get(did)):
         member = discord_member(did)
         if "roles" in member:
@@ -555,20 +537,10 @@ def use_key():
     success = use_key_for(did, key)
     if success:
         return jsonify({"ok": True, "message": "Key accepted and invalidated"}), 200
-    else:
-        return jsonify({"ok": False, "message": "Invalid or expired key"}), 400
-
-@app.route("/api/me")
-def api_me():
-    user = session.get("user")
-    return jsonify({
-        "logged_in": bool(user),
-        "user_id": (user or {}).get("id"),
-        "username": (user or {}).get("username"),
-    }), 200
+    return jsonify({"ok": False, "message": "Invalid or expired key"}), 400
 
 # -----------------------------------------------------------------------------
-# Override endpoints (owner only)
+# Owner-only overrides and role removal endpoints
 # -----------------------------------------------------------------------------
 @app.route("/override/all", methods=["GET", "POST", "DELETE"])
 def override_all():
@@ -587,6 +559,7 @@ def override_all():
         return jsonify({"ok": True, "global_override": False}), 200
     return jsonify({"ok": False, "message": "Method not allowed"}), 405
 
+
 @app.route("/override/<did>", methods=["GET", "POST", "DELETE"])
 def override_user(did):
     if not require_owner():
@@ -603,25 +576,23 @@ def override_user(did):
         return jsonify({"ok": True, "user_override": False, "discord_id": did}), 200
     return jsonify({"ok": False, "message": "Method not allowed"}), 405
 
+
 @app.route("/override", methods=["GET"])
 def list_overrides():
     if not require_owner():
         return jsonify({"ok": False, "message": "Forbidden"}), 403
-    users = []
-    for did, info in admin_overrides.items():
-        users.append({"id": did, "username": info.get("username", ""), "discriminator": info.get("discriminator", "")})
+    users = [{"id": did, "username": info.get("username", ""), "discriminator": info.get("discriminator", "")}
+             for did, info in admin_overrides.items()]
     return jsonify({"ok": True, "global_override": global_override, "users": users}), 200
 
-# -----------------------------------------------------------------------------
-# Role removal endpoints (owner only)
-# -----------------------------------------------------------------------------
+
 @app.route("/remove_role_now/<did>", methods=["POST"])
 def remove_role_now(did):
     if not require_owner():
         return jsonify({"ok": False, "message": "Forbidden"}), 403
     success = discord_remove_role(did)
-    status_code = 200 if success else 500
-    return jsonify({"ok": success, "discord_id": did}), status_code
+    return jsonify({"ok": success, "discord_id": did}), (200 if success else 500)
+
 
 @app.route("/remove_role_all", methods=["POST"])
 def remove_role_all():
@@ -629,6 +600,7 @@ def remove_role_all():
         return jsonify({"ok": False, "message": "Forbidden"}), 403
     if not DISCORD_GUILD_ID or not DISCORD_BOT_TOKEN:
         return jsonify({"ok": False, "message": "Missing guild or bot token"}), 400
+
     url = f"https://discord.com/api/guilds/{DISCORD_GUILD_ID}/members?limit=1000"
     headers = {"Authorization": f"Bot {DISCORD_BOT_TOKEN}"}
     resp = requests.get(url, headers=headers, timeout=15)
