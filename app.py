@@ -92,7 +92,7 @@ def load_keys() -> Dict[str, Any]:
         with open(KEYS_FILE) as f:
             return json.load(f)
     except Exception:
-        logging.exception("load_keys failed")
+        logging.exception("load_keys_failed")
         return {}
 
 def save_keys(store: Dict[str, Any]):
@@ -350,7 +350,7 @@ def login_callback():
         return render_template_string("<h2>Join required</h2><p>Please join the Discord server and try again.</p><p><a href='{{home}}'>Return</a></p>", home=BASE_URL), 403
     if not has_role:
         # role missing, still set cookie so front-end can show role-missing state
-        resp = make_response(render_template_string("<h2>Role missing</h2><p>Membership verified but required role missing.</p><p><a href='{{home}}'>Continue</a></p>", home=BASE_URL)))
+        resp = make_response(render_template_string("<h2>Role missing</h2><p>Membership verified but required role missing.</p><p><a href='{{home}}'>Continue</a></p>", home=BASE_URL))
         logging.info("Redirecting back to %s after login (role missing)", BASE_URL)
         return resp
 
