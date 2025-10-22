@@ -1,75 +1,62 @@
 # app.py
-"""
-Complete patched verifier
-- Session-based OAuth state
-- Properly encoded Discord authorize URL with prompt=consent (reduces native app handoff)
-- Same-tab redirects (no target=_blank)
-- /login/browser-fallback to recover when the Discord app intercepts the flow
-- Consolidated cookie config for cross-site session persistence (SameSite=None, Secure, HttpOnly, correct Domain)
-- CORS configured for your static site origin with credentials support
-- Endpoints: /login/discord, /login/discord/callback, /login/browser-fallback,
-  /portal/me, /status/<id>, /generate_key, /validate_key/<id>/<key>, /logout,
-  overrides and admin helpers
-Environment variables:
-  SECRET_KEY, BASE_URL, SESSION_COOKIE_DOMAIN, SESSION_COOKIE_NAME (optional),
-  DISCORD_CLIENT_ID, DISCORD_CLIENT_SECRET, DISCORD_REDIRECT (optional),
-  DISCORD_GUILD_ID, DISCORD_ROLE_ID, DISCORD_BOT_TOKEN,
-  OWNER_ID, STORE_DIR (optional), KEYS_FILE (optional), PORT (optional)
-"""
 import os
 import time
 import secrets
 import logging
 import json
 import re
+import hmac
+import hashlib
+import base64
 from datetime import timedelta
 from typing import Dict, Any
 from urllib.parse import urlencode, quote_plus
 
 import requests
 from flask import (
-    Flask, redirect, request, session, jsonify, render_template_string, make_response, url_for
+    Flask, redirect, request, session, jsonify, render_template_string,
+    make_response, url_for, send_from_directory, current_app
 )
 from flask_cors import CORS
 from dotenv import load_dotenv
 
-# ================== BOOT ==================
+# ----------------- BOOT -----------------
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
 
-# ================== APP SETUP ==================
-app = Flask(__name__)
+# ----------------- APP SETUP -----------------
+app = Flask(__name__, static_folder="static")
 app.secret_key = os.environ.get("SECRET_KEY", secrets.token_hex(32))
 app.permanent_session_lifetime = timedelta(days=1)
 
-# Ensure session cookie is emitted and usable for cross-site login flows
+# Consolidated cookie config — set SESSION_COOKIE_DOMAIN env to your parent domain
 app.config.update(
     SESSION_COOKIE_NAME=os.environ.get("SESSION_COOKIE_NAME", "session"),
-    SESSION_COOKIE_DOMAIN=os.environ.get("SESSION_COOKIE_DOMAIN", ".onrender.com"),  # set to your backend's parent domain
+    SESSION_COOKIE_DOMAIN=os.environ.get("SESSION_COOKIE_DOMAIN", ".gaming-mods.com"),
     SESSION_COOKIE_SECURE=True,
     SESSION_COOKIE_SAMESITE="None",
     SESSION_COOKIE_HTTPONLY=True,
     PROPAGATE_EXCEPTIONS=True,
 )
 
-# ================== SITE / ORIGINS ==================
+# ----------------- SITE / ORIGINS -----------------
 BASE_URL = os.environ.get("BASE_URL", "https://gaming-mods.com").rstrip("/")
 IONOS_INDEX = f"{BASE_URL}/index.html"
 IONOS_GAMES = f"{BASE_URL}/games.html"
 
-# Allow static site origin to call APIs with credentials
+# Allow your static site origin to call APIs with credentials
 CORS(app, origins=[BASE_URL], supports_credentials=True)
 
-# ================== DISCORD / OWNER CONFIG ==================
+# ----------------- DISCORD / OWNER CONFIG -----------------
 DISCORD_CLIENT_ID = os.environ.get("DISCORD_CLIENT_ID", "")
 DISCORD_CLIENT_SECRET = os.environ.get("DISCORD_CLIENT_SECRET", "")
-DISCORD_REDIRECT = os.environ.get("DISCORD_REDIRECT", "").strip()  # optional explicit callback
+DISCORD_REDIRECT = os.environ.get("DISCORD_REDIRECT", "").strip()
 DISCORD_GUILD_ID = os.environ.get("DISCORD_GUILD_ID", "")
 DISCORD_ROLE_ID = os.environ.get("DISCORD_ROLE_ID", "")
 DISCORD_BOT_TOKEN = os.environ.get("DISCORD_BOT_TOKEN", "")
 OWNER_ID = os.environ.get("OWNER_ID", "")
 
-# ================== STORAGE ==================
+# ----------------- STORAGE -----------------
 STORE_DIR = os.environ.get("STORE_DIR", ".")
 os.makedirs(STORE_DIR, exist_ok=True)
 KEYS_FILE = os.path.join(STORE_DIR, os.environ.get("KEYS_FILE", "keys_store.json"))
@@ -79,7 +66,7 @@ global_override = False
 admin_overrides: Dict[str, Dict[str, Any]] = {}
 login_history = []
 
-# ================== UTIL ==================
+# ----------------- UTIL -----------------
 def save_state():
     try:
         with open(STATE_FILE, "w") as f:
@@ -133,7 +120,25 @@ def _safe_json(resp: requests.Response) -> dict:
     except Exception:
         return {}
 
-# ================== DISCORD HELPERS ==================
+# ----------------- SIGNED STATE HELPERS -----------------
+def sign_state(raw: str, secret: str) -> str:
+    mac = hmac.new(secret.encode(), raw.encode(), hashlib.sha256).digest()
+    return base64.urlsafe_b64encode(raw.encode() + b"." + mac).decode()
+
+def verify_state_token(token: str, secret: str, max_age: int = 300) -> bool:
+    try:
+        blob = base64.urlsafe_b64decode(token.encode())
+        raw, mac = blob.split(b".", 1)
+        expect = hmac.new(secret.encode(), raw, hashlib.sha256).digest()
+        if not hmac.compare_digest(mac, expect):
+            return False
+        nonce, ts_str = raw.decode().split(":", 1)
+        ts = int(ts_str)
+        return (int(time.time()) - ts) <= max_age
+    except Exception:
+        return False
+
+# ----------------- DISCORD HELPERS -----------------
 def discord_exchange_token(code: str, redirect_uri: str) -> dict:
     url = "https://discord.com/api/oauth2/token"
     data = {
@@ -146,9 +151,7 @@ def discord_exchange_token(code: str, redirect_uri: str) -> dict:
     headers = {"Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json"}
     try:
         resp = requests.post(url, data=data, headers=headers, timeout=15)
-        return _safe_json(resp) if resp.status_code == 200 else {
-            "error": "token_error", "status": resp.status_code, "body": resp.text
-        }
+        return _safe_json(resp) if resp.status_code == 200 else {"error": "token_error", "status": resp.status_code, "body": resp.text}
     except Exception:
         logging.exception("discord_exchange_token")
         return {"error": "network", "message": "token exchange network error"}
@@ -156,9 +159,7 @@ def discord_exchange_token(code: str, redirect_uri: str) -> dict:
 def discord_get_user(token: str) -> dict:
     try:
         resp = requests.get("https://discord.com/api/users/@me", headers={"Authorization": f"Bearer {token}"}, timeout=15)
-        return _safe_json(resp) if resp.status_code == 200 else {
-            "error": "user_error", "status": resp.status_code, "body": resp.text
-        }
+        return _safe_json(resp) if resp.status_code == 200 else {"error": "user_error", "status": resp.status_code, "body": resp.text}
     except Exception:
         logging.exception("discord_get_user")
         return {"error": "network", "message": "user fetch failed"}
@@ -227,7 +228,7 @@ def discord_remove_role(did: str) -> bool:
 def should_assign_on_login(did: str) -> bool:
     return global_override or bool(admin_overrides.get(did, False))
 
-# Build properly encoded authorize URL with prompt=consent
+# ----------------- AUTHORIZE URL -----------------
 def build_discord_authorize_url(state: str) -> str:
     redirect_uri = DISCORD_REDIRECT or (request.url_root.rstrip("/") + "/login/discord/callback")
     params = {
@@ -240,13 +241,21 @@ def build_discord_authorize_url(state: str) -> str:
     }
     return "https://discord.com/api/oauth2/authorize?" + urlencode(params, quote_via=quote_plus)
 
-# ================== ERROR HANDLER ==================
+# ----------------- ERROR HANDLER -----------------
 @app.errorhandler(Exception)
 def handle_exception(e):
     logging.exception("Unhandled exception")
     return jsonify({"ok": False, "error": str(e)}), 500
 
-# ================== STATIC REDIRECTS ==================
+# ----------------- STATIC / FAVICON -----------------
+@app.route("/favicon.ico")
+def favicon():
+    try:
+        return send_from_directory(current_app.static_folder or "static", "favicon.ico")
+    except Exception:
+        logging.exception("favicon handler error")
+        return ("", 204)
+
 @app.route("/")
 def index():
     return redirect(IONOS_INDEX)
@@ -255,38 +264,31 @@ def index():
 def games():
     return redirect(IONOS_GAMES)
 
-# ================== OAUTH FLOW ==================
+# ----------------- OAUTH FLOW (signed-state) -----------------
 @app.route("/login/discord")
 def login_discord():
     if not DISCORD_CLIENT_ID:
         return "Discord client ID not configured", 500
-    state = secrets.token_urlsafe(24)
-    session['oauth_state'] = state
+    raw = f"{secrets.token_urlsafe(16)}:{int(time.time())}"
+    state = sign_state(raw, app.secret_key)
     auth_url = build_discord_authorize_url(state)
-    logging.info("login_discord -> state=%s auth_url=%s", state, auth_url)
+    logging.info("login_discord -> state_signed=%s auth_url=%s", state[:32] + "...", auth_url)
     return redirect(auth_url)
 
 @app.route("/login/browser-fallback")
 def browser_fallback():
     verifier_login = (request.url_root.rstrip("/") + "/login/discord")
     fallback_html = """
-    <!doctype html>
-    <html>
-      <head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Open in browser</title></head>
-      <body style="font-family:system-ui,Arial,sans-serif;display:flex;min-height:100vh;align-items:center;justify-content:center;margin:0;background:#0b0b0b;color:#eee">
-        <div style="max-width:520px;padding:28px;border-radius:12px;background:#0f0f0f;border:1px solid rgba(255,255,255,0.06);text-align:center;">
-          <h1 style="margin:0 0 12px;font-size:20px">Open in browser to continue</h1>
-          <p style="color:#bbb;margin:0 0 18px">Your device opened the Discord app. To complete login in your browser, tap the button below.</p>
-          <button id="retry" style="appearance:none;border:0;padding:12px 18px;border-radius:8px;background:#ffb000;color:#000;font-weight:700;cursor:pointer">Retry login in browser</button>
-          <p style="font-size:13px;color:#999;margin-top:12px">If redirected again into the Discord app, return here and use your OS “Open in browser”.</p>
-        </div>
-        <script>
-          document.getElementById('retry').addEventListener('click', function(){
-            window.location.href = '%s';
-          });
-        </script>
-      </body>
-    </html>
+    <!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Open in browser</title></head>
+    <body style="font-family:system-ui,Arial,sans-serif;display:flex;min-height:100vh;align-items:center;justify-content:center;margin:0;background:#0b0b0b;color:#eee">
+      <div style="max-width:520px;padding:28px;border-radius:12px;background:#0f0f0f;border:1px solid rgba(255,255,255,0.06);text-align:center;">
+        <h1 style="margin:0 0 12px;font-size:20px">Open in browser to continue</h1>
+        <p style="color:#bbb;margin:0 0 18px">Your device opened the Discord app. To complete login in your browser, tap the button below.</p>
+        <button id="retry" style="appearance:none;border:0;padding:12px 18px;border-radius:8px;background:#ffb000;color:#000;font-weight:700;cursor:pointer">Retry login in browser</button>
+        <p style="font-size:13px;color:#999;margin-top:12px">If redirected again into the Discord app, return here and use your OS “Open in browser”.</p>
+      </div>
+      <script>document.getElementById('retry').addEventListener('click',function(){window.location.href='%s';});</script>
+    </body></html>
     """ % verifier_login
     return fallback_html, 200, {"Content-Type": "text/html; charset=utf-8"}
 
@@ -294,10 +296,10 @@ def browser_fallback():
 def login_callback():
     state = request.args.get("state", "")
     code = request.args.get("code", "")
-    saved = session.pop('oauth_state', None)
-    logging.info("OAuth callback received state=%r saved=%r code_present=%s", state, saved, bool(code))
-    if not state or not saved or not secrets.compare_digest(state, saved):
-        logging.warning("Invalid or expired OAuth state; directing user to fallback")
+    logging.info("OAuth callback received state=%r code_present=%s", state, bool(code))
+
+    if not state or not verify_state_token(state, app.secret_key, max_age=300):
+        logging.warning("Invalid or expired signed state; directing user to fallback")
         return redirect(url_for('browser_fallback'))
     if not code:
         return "Missing code", 400
@@ -335,7 +337,6 @@ def login_callback():
     login_history.append(session["user"])
     logging.info("Session set for user %s", did)
 
-    # Optional admin override behavior
     try:
         if should_assign_on_login(did) and is_member:
             discord_add_role(did)
@@ -348,13 +349,16 @@ def login_callback():
     if not is_member:
         return render_template_string("<h2>Join required</h2><p>Please join the Discord server and try again.</p><p><a href='{{home}}'>Return</a></p>", home=BASE_URL), 403
     if not has_role:
-        return render_template_string("<h2>Role missing</h2><p>Membership verified but required role missing.</p><p><a href='{{home}}'>Continue</a></p>", home=BASE_URL), 200
+        # role missing, still set cookie so front-end can show role-missing state
+        resp = make_response(render_template_string("<h2>Role missing</h2><p>Membership verified but required role missing.</p><p><a href='{{home}}'>Continue</a></p>", home=BASE_URL)))
+        logging.info("Redirecting back to %s after login (role missing)", BASE_URL)
+        return resp
 
     resp = make_response(redirect(BASE_URL))
     logging.info("Redirecting back to %s with session cookie", BASE_URL)
     return resp
 
-# ================== SESSION / STATUS ==================
+# ----------------- SESSION / STATUS -----------------
 @app.route("/portal/me")
 def portal_me():
     user = session.get("user")
@@ -385,7 +389,7 @@ def logout():
     session.clear()
     return redirect(BASE_URL)
 
-# ================== KEYS ==================
+# ----------------- KEYS -----------------
 def _make_key_value(did: str) -> str:
     rnd = secrets.token_hex(24).upper()
     return f"GMD-{did}-{rnd}"
@@ -486,7 +490,7 @@ def validate_key(did, key):
 
     return jsonify({"ok": True, "valid": True, "message": "Key valid and consumed"}), 200
 
-# ================== ADMIN / OVERRIDES ==================
+# ----------------- ADMIN / OVERRIDES -----------------
 @app.route("/override/all", methods=["GET", "POST", "DELETE"])
 def override_all():
     global global_override
@@ -531,7 +535,7 @@ def remove_role_now(did):
 def health():
     return jsonify({"ok": True, "ts": now_ts()}), 200
 
-# ================== MAIN ==================
+# ----------------- MAIN -----------------
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port, debug=False)
