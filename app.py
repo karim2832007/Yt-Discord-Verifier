@@ -39,6 +39,16 @@ app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", secrets.token_hex(32))
 app.permanent_session_lifetime = timedelta(days=1)
 
+# Ensure session cookie is emitted and usable for cross-site login flows
+app.config.update(
+    SESSION_COOKIE_NAME = os.environ.get('SESSION_COOKIE_NAME', 'session'),
+    SESSION_COOKIE_DOMAIN = os.environ.get('SESSION_COOKIE_DOMAIN', '.onrender.com'),
+    SESSION_COOKIE_SECURE = True,
+    SESSION_COOKIE_SAMESITE = "None",
+    SESSION_COOKIE_HTTPONLY = True,
+)
+
+
 # Config / urls
 BASE_URL = os.environ.get("BASE_URL", "https://gaming-mods.com").rstrip("/")
 IONOS_INDEX = f"{BASE_URL}/index.html"
