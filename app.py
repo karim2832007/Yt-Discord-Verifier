@@ -571,11 +571,9 @@ def list_overrides():
         users.append({"id": did, "username": info.get("username", ""), "discriminator": info.get("discriminator", "")})
     return jsonify({"ok": True, "globaloverride": globaloverride, "users": users}), 200
 
--------------------------
-
-Role remove helpers (owner only)
-
--------------------------
+#-------------------------
+#Role remove helpers (owner only)
+#-------------------------
 def discordremoverole(did: str) -> bool:
     if not DISCORDGUILDID or not DISCORDBOTTOKEN or not DISCORDROLEID:
         return False
@@ -615,11 +613,9 @@ def removeroleall():
             failed.append(did)
     return jsonify({"ok": True, "removedcount": len(removed), "failedcount": len(failed), "removedsample": removed[:10], "failedsample": failed[:10]}), 200
 
--------------------------
-
-Run server
-
--------------------------
+#-------------------------
+#       Run server
+#-------------------------
 if name == "main":
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port, debug=False)
