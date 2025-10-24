@@ -613,9 +613,9 @@ def removeroleall():
             failed.append(did)
     return jsonify({"ok": True, "removedcount": len(removed), "failedcount": len(failed), "removedsample": removed[:10], "failedsample": failed[:10]}), 200
 
-#-------------------------
-#       Run server
-#-------------------------
-if name == "main":
+# -------------------------
+# Run server
+# -------------------------
+if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port, debug=False)
