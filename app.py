@@ -1,71 +1,77 @@
-# app.py
+#!/usr/bin/env python3
+# app.py — Yt-Discord-Verifier (remade)
 import os
 import time
 import secrets
-import logging
-import json
-import re
 import hmac
 import hashlib
 import base64
+import logging
+import sqlite3
 from datetime import timedelta
-from typing import Dict, Any
-from urllib.parse import urlencode, quote_plus
-
-import requests
-from flask import (
-    Flask, redirect, request, session, jsonify, render_template_string,
-    make_response, url_for, send_from_directory, current_app
-)
-from flask_cors import CORS
+from urllib.parse import unquote
 from dotenv import load_dotenv
+from flask import Flask, redirect, request, session, jsonify, render_template_string, g
+from flask_cors import CORS
+import requests
+import json
 
+# -------------------------
+# Environment / config
+# -------------------------
 load_dotenv()
-logging.basicConfig(level=logging.INFO)
 
-app = Flask(__name__, static_folder="static")
+app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", secrets.token_hex(32))
 app.permanent_session_lifetime = timedelta(days=1)
 
-# Consolidated cookie config — set SESSION_COOKIE_DOMAIN to your parent domain (leading dot)
-app.config.update(
-    SESSION_COOKIE_NAME=os.environ.get("SESSION_COOKIE_NAME", "session"),
-    SESSION_COOKIE_DOMAIN=os.environ.get("SESSION_COOKIE_DOMAIN", ".gaming-mods.com"),
-    SESSION_COOKIE_SECURE=True,
-    SESSION_COOKIE_SAMESITE="None",
-    SESSION_COOKIE_HTTPONLY=True,
-    PROPAGATE_EXCEPTIONS=True,
-)
-
+# Frontend origin (for CORS)
 BASE_URL = os.environ.get("BASE_URL", "https://gaming-mods.com").rstrip("/")
-IONOS_INDEX = f"{BASE_URL}/index.html"
-IONOS_GAMES = f"{BASE_URL}/games.html"
-
 CORS(app, origins=[BASE_URL], supports_credentials=True)
 
+# Cookie settings (adjust domain as needed)
+SESSION_COOKIE_DOMAIN = os.environ.get("SESSION_COOKIE_DOMAIN", ".gaming-mods.com")
+app.config.update(
+    SESSION_COOKIE_DOMAIN=SESSION_COOKIE_DOMAIN,
+    SESSION_COOKIE_SECURE=True,
+    SESSION_COOKIE_SAMESITE="None",
+)
+
+# Discord & owner
 DISCORD_CLIENT_ID = os.environ.get("DISCORD_CLIENT_ID", "")
 DISCORD_CLIENT_SECRET = os.environ.get("DISCORD_CLIENT_SECRET", "")
-DISCORD_REDIRECT = os.environ.get("DISCORD_REDIRECT", "").strip()
 DISCORD_GUILD_ID = os.environ.get("DISCORD_GUILD_ID", "")
 DISCORD_ROLE_ID = os.environ.get("DISCORD_ROLE_ID", "")
 DISCORD_BOT_TOKEN = os.environ.get("DISCORD_BOT_TOKEN", "")
 OWNER_ID = os.environ.get("OWNER_ID", "")
 
-STORE_DIR = os.environ.get("STORE_DIR", ".")
-os.makedirs(STORE_DIR, exist_ok=True)
-KEYS_FILE = os.path.join(STORE_DIR, os.environ.get("KEYS_FILE", "keys_store.json"))
-STATE_FILE = os.path.join(STORE_DIR, os.environ.get("STATE_FILE", "override_state.json"))
+# Key generation config: random part length 10..18
+KEY_DB_PATH = os.environ.get("KEY_DB_PATH", "issued_keys.sqlite3")
+KEY_PREFIX = os.environ.get("KEY_PREFIX", "GMD")
+MIN_RANDOM_LEN = int(os.environ.get("MIN_RANDOM_LEN", 10))
+MAX_RANDOM_LEN = int(os.environ.get("MAX_RANDOM_LEN", 18))
+ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789"
 
+# Logging
+logging.basicConfig(level=logging.INFO)
+app.config["PROPAGATE_EXCEPTIONS"] = True
+
+# -------------------------
+# Runtime state
+# -------------------------
 global_override = False
-admin_overrides: Dict[str, Dict[str, Any]] = {}
+admin_overrides = {}
 login_history = []
+STATE_FILE = "override_state.json"
+
 
 def save_state():
     try:
         with open(STATE_FILE, "w") as f:
             json.dump({"global_override": global_override, "admin_overrides": admin_overrides}, f)
     except Exception:
-        logging.exception("save_state failed")
+        logging.exception("Failed to save state")
+
 
 def load_state():
     global global_override, admin_overrides
@@ -73,65 +79,130 @@ def load_state():
         if os.path.exists(STATE_FILE):
             with open(STATE_FILE) as f:
                 data = json.load(f)
-            global_override = data.get("global_override", False)
-            admin_overrides = data.get("admin_overrides", {})
+                global_override = data.get("global_override", False)
+                admin_overrides = data.get("admin_overrides", {})
     except Exception:
-        logging.exception("load_state failed")
+        logging.exception("Failed to load state")
 
-def load_keys() -> Dict[str, Any]:
-    try:
-        if not os.path.exists(KEYS_FILE):
-            save_keys({})
-        with open(KEYS_FILE) as f:
-            return json.load(f)
-    except Exception:
-        logging.exception("load_keys failed")
-        return {}
-
-def save_keys(store: Dict[str, Any]):
-    try:
-        with open(KEYS_FILE, "w") as f:
-            json.dump(store, f)
-    except Exception:
-        logging.exception("save_keys failed")
 
 load_state()
+
+# -------------------------
+# Helpers
+# -------------------------
+STATE_TTL = 15 * 60
+
 
 def now_ts() -> int:
     return int(time.time())
 
-def is_valid_discord_id(did: str) -> bool:
-    return bool(re.fullmatch(r"\d{1,24}", (did or "")))
+
+def sign_state(payload: str) -> str:
+    key = app.secret_key.encode()
+    sig = hmac.new(key, payload.encode(), hashlib.sha256).digest()
+    token = f"{payload}|{base64.urlsafe_b64encode(sig).decode()}"
+    return base64.urlsafe_b64encode(token.encode()).decode()
+
+
+def verify_state(token: str) -> bool:
+    try:
+        raw = base64.urlsafe_b64decode(token).decode()
+        payload, sig_b64 = raw.split("|", 1)
+        _, ts_str = payload.split(".", 1)
+        if now_ts() - int(ts_str) > STATE_TTL:
+            return False
+        key = app.secret_key.encode()
+        expected = hmac.new(key, payload.encode(), hashlib.sha256).digest()
+        given = base64.urlsafe_b64decode(sig_b64)
+        return hmac.compare_digest(expected, given)
+    except Exception:
+        return False
+
+
+def make_state() -> str:
+    payload = f"{secrets.token_hex(8)}.{now_ts()}"
+    return sign_state(payload)
+
 
 def require_owner() -> bool:
     user = session.get("user")
     return bool(user and str(user.get("id")) == str(OWNER_ID))
 
-def _safe_json(resp: requests.Response) -> dict:
+
+def _safe_json(resp):
     try:
         return resp.json()
     except Exception:
         return {}
 
-# Signed state helpers
-def sign_state(raw: str, secret: str) -> str:
-    mac = hmac.new(secret.encode(), raw.encode(), hashlib.sha256).digest()
-    return base64.urlsafe_b64encode(raw.encode() + b"." + mac).decode()
+# -------------------------
+# SQLite key storage
+# -------------------------
+def get_key_db():
+    db = getattr(g, "_key_db", None)
+    if db is None:
+        db = sqlite3.connect(KEY_DB_PATH, detect_types=sqlite3.PARSE_DECLTYPES)
+        db.row_factory = sqlite3.Row
+        g._key_db = db
+    return db
 
-def verify_state_token(token: str, secret: str, max_age: int = 300) -> bool:
-    try:
-        blob = base64.urlsafe_b64decode(token.encode())
-        raw, mac = blob.split(b".", 1)
-        expect = hmac.new(secret.encode(), raw, hashlib.sha256).digest()
-        if not hmac.compare_digest(mac, expect):
-            return False
-        nonce, ts_str = raw.decode().split(":", 1)
-        ts = int(ts_str)
-        return (int(time.time()) - ts) <= max_age
-    except Exception:
-        return False
 
-# Discord API helpers
+@app.teardown_appcontext
+def close_key_db(exception):
+    db = getattr(g, "_key_db", None)
+    if db is not None:
+        db.close()
+
+
+def ensure_key_table():
+    db = get_key_db()
+    db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS issued_keys (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            discord_id TEXT NOT NULL,
+            key_text TEXT NOT NULL UNIQUE,
+            created_at INTEGER NOT NULL,
+            consumed INTEGER NOT NULL DEFAULT 0,
+            consumed_at INTEGER
+        );
+        """
+    )
+    db.execute("CREATE INDEX IF NOT EXISTS idx_issued_keys_discord ON issued_keys(discord_id)")
+    db.commit()
+
+
+def _random_token():
+    length = secrets.choice(range(MIN_RANDOM_LEN, MAX_RANDOM_LEN + 1))
+    return ''.join(secrets.choice(ALPHABET) for _ in range(length))
+
+
+def _build_key(discord_id: str, random_part: str) -> str:
+    if KEY_PREFIX:
+        return f"{KEY_PREFIX}-{discord_id}-{random_part}"
+    return random_part
+
+
+def create_unique_key(discord_id: str, max_attempts: int = 12) -> str:
+    ensure_key_table()
+    db = get_key_db()
+    for _ in range(max_attempts):
+        rp = _random_token()
+        key_text = _build_key(discord_id, rp)
+        try:
+            db.execute(
+                "INSERT INTO issued_keys (discord_id, key_text, created_at, consumed) VALUES (?, ?, ?, 0)",
+                (str(discord_id), key_text, now_ts()),
+            )
+            db.commit()
+            return key_text
+        except sqlite3.IntegrityError:
+            continue
+    raise RuntimeError("Failed to generate unique key after multiple attempts")
+
+# -------------------------
+# Discord helpers
+# -------------------------
 def discord_exchange_token(code: str, redirect_uri: str) -> dict:
     url = "https://discord.com/api/oauth2/token"
     data = {
@@ -141,216 +212,223 @@ def discord_exchange_token(code: str, redirect_uri: str) -> dict:
         "code": code,
         "redirect_uri": redirect_uri,
     }
-    headers = {"Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json"}
+    headers = {
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Accept": "application/json",
+        "User-Agent": "GamingMods-Verifier/1.0 (+https://gaming-mods.com)",
+    }
     try:
         resp = requests.post(url, data=data, headers=headers, timeout=15)
-        return _safe_json(resp) if resp.status_code == 200 else {"error": "token_error", "status": resp.status_code, "body": resp.text}
-    except Exception:
-        logging.exception("discord_exchange_token")
-        return {"error": "network", "message": "token exchange network error"}
+    except requests.RequestException as exc:
+        logging.warning("discord_exchange_token network error: %s", exc)
+        return {"error": "network_error", "message": str(exc)}
+    if resp.status_code != 200:
+        return {"error": "token_exchange_failed", "status": resp.status_code, "body": resp.text, "json": _safe_json(resp)}
+    return _safe_json(resp)
+
 
 def discord_get_user(token: str) -> dict:
     try:
-        resp = requests.get("https://discord.com/api/users/@me", headers={"Authorization": f"Bearer {token}"}, timeout=15)
-        return _safe_json(resp) if resp.status_code == 200 else {"error": "user_error", "status": resp.status_code, "body": resp.text}
-    except Exception:
-        logging.exception("discord_get_user")
-        return {"error": "network", "message": "user fetch failed"}
+        resp = requests.get(
+            "https://discord.com/api/users/@me",
+            headers={"Authorization": f"Bearer {token}", "User-Agent": "GamingMods-Verifier/1.0"},
+            timeout=15,
+        )
+    except Exception as e:
+        return {"error": "user_fetch_failed", "message": str(e)}
+    if resp.status_code != 200:
+        return {"status_code": resp.status_code, "error": resp.text}
+    return _safe_json(resp)
+
 
 def discord_member(did: str) -> dict:
     if not DISCORD_GUILD_ID or not DISCORD_BOT_TOKEN:
         return {"status_code": 400, "error": "missing_guild_or_bot_token"}
-    try:
-        resp = requests.get(
-            f"https://discord.com/api/guilds/{DISCORD_GUILD_ID}/members/{did}",
-            headers={"Authorization": f"Bot {DISCORD_BOT_TOKEN}"},
-            timeout=15,
-        )
-        if resp.status_code == 200:
-            return _safe_json(resp)
-        return {"status_code": resp.status_code, "error": resp.text}
-    except Exception:
-        logging.exception("discord_member")
-        return {"status_code": 500, "error": "member lookup failed"}
+    url = f"https://discord.com/api/guilds/{DISCORD_GUILD_ID}/members/{did}"
+    resp = requests.get(url, headers={"Authorization": f"Bot {DISCORD_BOT_TOKEN}"}, timeout=15)
+    if resp.status_code == 200:
+        try:
+            return resp.json()
+        except Exception:
+            return {"status_code": resp.status_code, "error": resp.text}
+    return {"status_code": resp.status_code, "error": resp.text}
 
-def discord_is_banned(did: str) -> bool:
-    if not DISCORD_GUILD_ID or not DISCORD_BOT_TOKEN:
-        return False
-    try:
-        resp = requests.get(
-            f"https://discord.com/api/guilds/{DISCORD_GUILD_ID}/bans/{did}",
-            headers={"Authorization": f"Bot {DISCORD_BOT_TOKEN}"},
-            timeout=15,
-        )
-        return resp.status_code == 200
-    except Exception:
-        logging.exception("discord_is_banned")
-        return False
 
 def discord_has_role(member: dict) -> bool:
     return str(DISCORD_ROLE_ID) in [str(r) for r in member.get("roles", [])]
 
+
 def discord_add_role(did: str) -> bool:
     if not DISCORD_GUILD_ID or not DISCORD_BOT_TOKEN or not DISCORD_ROLE_ID:
         return False
-    try:
-        resp = requests.put(
-            f"https://discord.com/api/guilds/{DISCORD_GUILD_ID}/members/{did}/roles/{DISCORD_ROLE_ID}",
-            headers={"Authorization": f"Bot {DISCORD_BOT_TOKEN}"},
-            timeout=15,
-        )
-        return resp.status_code in (200, 204)
-    except Exception:
-        logging.exception("discord_add_role")
-        return False
+    url = f"https://discord.com/api/guilds/{DISCORD_GUILD_ID}/members/{did}/roles/{DISCORD_ROLE_ID}"
+    resp = requests.put(url, headers={"Authorization": f"Bot {DISCORD_BOT_TOKEN}"}, timeout=15)
+    return resp.status_code in (200, 204)
 
-def discord_remove_role(did: str) -> bool:
-    if not DISCORD_GUILD_ID or not DISCORD_BOT_TOKEN or not DISCORD_ROLE_ID:
-        return False
-    try:
-        resp = requests.delete(
-            f"https://discord.com/api/guilds/{DISCORD_GUILD_ID}/members/{did}/roles/{DISCORD_ROLE_ID}",
-            headers={"Authorization": f"Bot {DISCORD_BOT_TOKEN}"},
-            timeout=15,
-        )
-        return resp.status_code in (200, 204)
-    except Exception:
-        logging.exception("discord_remove_role")
-        return False
 
-def should_assign_on_login(did: str) -> bool:
-    return global_override or bool(admin_overrides.get(did, False))
-
-def build_discord_authorize_url(state: str) -> str:
-    redirect_uri = DISCORD_REDIRECT or (request.url_root.rstrip("/") + "/login/discord/callback")
-    params = {
-        "client_id": DISCORD_CLIENT_ID,
-        "redirect_uri": redirect_uri,
-        "response_type": "code",
-        "scope": "identify",
-        "state": state,
-        "prompt": "consent",
-    }
-    return "https://discord.com/api/oauth2/authorize?" + urlencode(params, quote_via=quote_plus)
-
+# -------------------------
+# Error handler
+# -------------------------
 @app.errorhandler(Exception)
 def handle_exception(e):
-    logging.exception("Unhandled exception")
+    logging.exception("Unhandled exception:")
     return jsonify({"ok": False, "error": str(e)}), 500
 
-# Serve favicon if present
-@app.route("/favicon.ico")
-def favicon():
-    try:
-        return send_from_directory(current_app.static_folder or "static", "favicon.ico")
-    except Exception:
-        logging.exception("favicon handler error")
-        return ("", 204)
-
+# -------------------------
+# Front-end redirects
+# -------------------------
 @app.route("/")
-def index():
-    return redirect(IONOS_INDEX)
+def index_redirect():
+    return redirect(BASE_URL)
+
+
+@app.route("/admin")
+def serve_admin():
+    if not require_owner():
+        return "Forbidden", 403
+    return redirect(f"{BASE_URL}/admin.html")
+
 
 @app.route("/games")
-def games():
-    return redirect(IONOS_GAMES)
+def serve_games():
+    return redirect(f"{BASE_URL}/games.html")
 
-# OAuth: signed-state flow
+
+@app.route("/privacy")
+def serve_privacy():
+    return redirect(f"{BASE_URL}/privacy.html")
+
+
+@app.route("/donate")
+def serve_donate():
+    return redirect(f"{BASE_URL}/donate.html")
+
+
+@app.route("/admin/logins")
+def admin_logins():
+    if not require_owner():
+        return jsonify({"ok": False, "message": "Forbidden"}), 403
+    return jsonify({"ok": True, "logins": login_history}), 200
+
+# -------------------------
+# OAuth endpoints (login and callback)
+# -------------------------
 @app.route("/login/discord")
 def login_discord():
-    if not DISCORD_CLIENT_ID:
-        return "Discord client ID not configured", 500
-    raw = f"{secrets.token_urlsafe(16)}:{int(time.time())}"
-    state = sign_state(raw, app.secret_key)
-    auth_url = build_discord_authorize_url(state)
-    logging.info("login_discord -> state_signed=%s auth_url=%s", state[:32] + "...", auth_url)
+    state = make_state()
+    redirect_uri = os.environ.get("DISCORD_REDIRECT") or f"{request.url_root.rstrip('/')}/login/discord/callback"
+    auth_url = (
+        "https://discord.com/api/oauth2/authorize"
+        f"?client_id={DISCORD_CLIENT_ID}"
+        f"&redirect_uri={redirect_uri}"
+        "&response_type=code&scope=identify"
+        f"&state={state}"
+    )
     return redirect(auth_url)
 
-@app.route("/login/browser-fallback")
-def browser_fallback():
-    verifier_login = (request.url_root.rstrip("/") + "/login/discord")
-    # Use .format to avoid f-string brace conflicts inside JS block
-    fallback_html = """
-    <!doctype html>
-    <html>
-      <head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Open in browser</title></head>
-      <body style="font-family:system-ui,Arial,sans-serif;display:flex;min-height:100vh;align-items:center;justify-content:center;margin:0;background:#0b0b0b;color:#eee">
-        <div style="max-width:520px;padding:28px;border-radius:12px;background:#0f0f0f;border:1px solid rgba(255,255,255,0.06);text-align:center;">
-          <h1 style="margin:0 0 12px;font-size:20px">Open in browser to continue</h1>
-          <p style="color:#bbb;margin:0 0 18px">Your device opened the Discord app. To complete login in your browser, tap the button below.</p>
-          <button id="retry" style="appearance:none;border:0;padding:12px 18px;border-radius:8px;background:#ffb000;color:#000;font-weight:700;cursor:pointer">Retry login in browser</button>
-          <p style="font-size:13px;color:#999;margin-top:12px">If redirected again into the Discord app, return here and use your OS “Open in browser”.</p>
-        </div>
-        <script>document.getElementById('retry').addEventListener('click', function(){ window.location.href = "{0}"; });</script>
-      </body>
-    </html>
-    """.format(verifier_login)
-    return fallback_html, 200, {"Content-Type": "text/html; charset=utf-8"}
 
-@app.route("/login/discord/callback")
-def login_callback():
+def _discord_callback():
     state = request.args.get("state", "")
     code = request.args.get("code", "")
-    logging.info("OAuth callback received state=%r code_present=%s", state, bool(code))
-
-    if not state or not verify_state_token(state, app.secret_key, max_age=300):
-        logging.warning("Invalid or expired signed state; directing user to fallback")
-        return redirect(url_for('browser_fallback'))
+    if not state or not verify_state(state):
+        return "Invalid or expired state", 400
     if not code:
         return "Missing code", 400
 
-    redirect_uri = DISCORD_REDIRECT or request.base_url
+    redirect_uri = os.environ.get("DISCORD_REDIRECT") or request.base_url
     token_resp = discord_exchange_token(code, redirect_uri)
-    if token_resp.get("error"):
+    if isinstance(token_resp, dict) and token_resp.get("error"):
         logging.warning("Token exchange failed: %s", token_resp)
-        return render_template_string("<h2>Login failed</h2><pre>{{body}}</pre><p><a href='{{home}}'>Return</a></p>", body=token_resp, home=BASE_URL), 400
+        brief = json.dumps({k: token_resp.get(k) for k in ("error", "status") if k in token_resp})
+        body_preview = (token_resp.get("body") or "")[:800]
+        return render_template_string(
+            "<html><body><h2>Login failed</h2><pre>{{ brief }}</pre><pre>{{ body_preview }}</pre></body></html>",
+            brief=brief,
+            body_preview=body_preview,
+        ), 400
 
     access_token = token_resp.get("access_token")
     if not access_token:
-        logging.warning("No access token in response")
-        return "Token exchange returned no access token", 400
+        return jsonify({"ok": False, "message": "No access_token returned", "details": token_resp}), 400
 
     user_info = discord_get_user(access_token)
     did = str(user_info.get("id") or "")
-    if not did or not is_valid_discord_id(did):
+    if not did:
         logging.warning("discord_get_user failed: %s", user_info)
-        return render_template_string("<h2>User lookup failed</h2><pre>{{body}}</pre><p><a href='{{home}}'>Return</a></p>", body=user_info, home=BASE_URL), 400
+        return jsonify({"ok": False, "message": "Discord user lookup failed", "details": user_info}), 400
 
-    banned = discord_is_banned(did)
-    member_resp = discord_member(did)
-    is_member = "roles" in member_resp
-    has_role = bool(is_member and discord_has_role(member_resp))
+    # Assign role at login: attempt to add role (best-effort). This ensures users receive role on login.
+    try:
+        discord_add_role(did)
+    except Exception:
+        logging.exception("Role assignment attempt failed at login")
 
     session.permanent = True
-    session["user"] = {
-        "id": did,
-        "username": user_info.get("username", ""),
-        "discriminator": user_info.get("discriminator", ""),
-        "ts": now_ts(),
-    }
+    session["user"] = {"id": did, "username": user_info.get("username", ""), "discriminator": user_info.get("discriminator", ""), "ts": now_ts()}
     login_history.append(session["user"])
-    logging.info("Session set for user %s", did)
 
-    try:
-        if should_assign_on_login(did) and is_member:
-            discord_add_role(did)
-            has_role = True
-    except Exception:
-        logging.exception("role assignment on login failed")
+    return render_template_string(
+        """
+        <!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+        <title>Confirm Your Discord ID</title>
+        <style>body{background:#0a0a0a;color:#eee;font-family:Inter,SegoeUI,Arial;height:100vh;display:flex;align-items:center;justify-content:center;margin:0}
+        .card{background:rgba(0,0,0,0.6);padding:2rem;border-radius:12px;text-align:center;max-width:520px}
+        h2{color:#FFD700;margin-bottom:.5rem} .id{font-size:1.2rem;margin:1rem 0;color:#fff;word-break:break-all}
+        .row{display:flex;gap:.75rem;justify-content:center;margin-top:1rem} button{padding:.75rem 1.25rem;border:none;border-radius:8px;cursor:pointer;font-weight:bold;color:#fff;background:#111}
+        button.primary{background:#2b2b2b} button.enabled{background:#1a73e8} button.disabled{opacity:.6;cursor:not-allowed}
+        </style></head><body>
+        <div class="card"><h2>Login successful.</h2>
+        <p class="id">Your Discord ID: <strong id="did">{{ did }}</strong></p>
+        <div class="row">
+        <button id="copy" class="primary">Copy ID</button>
+        <button id="continue" class="disabled" disabled>Continue</button>
+        </div></div>
+        <script>
+        const didEl = document.getElementById('did');
+        const copyBtn = document.getElementById('copy');
+        const contBtn = document.getElementById('continue');
+        const DID = didEl.textContent.trim();
+        const TARGET = "{{ index }}";
+        copyBtn.addEventListener('click', async () => {
+            try {
+                await navigator.clipboard.writeText(DID);
+                copyBtn.textContent = 'Copied!';
+                contBtn.disabled = false;
+                contBtn.classList.remove('disabled');
+                contBtn.classList.add('enabled');
+            } catch (err) {
+                const range = document.createRange();
+                range.selectNodeContents(didEl);
+                const sel = window.getSelection();
+                sel.removeAllRanges();
+                sel.addRange(range);
+                copyBtn.textContent = 'Select and press Ctrl+C';
+            }
+        });
+        contBtn.addEventListener('click', () => {
+            if (contBtn.disabled) return;
+            const sep = TARGET.includes('?') ? '&' : '?';
+            window.location.href = TARGET + sep + 'discord_id=' + encodeURIComponent(DID);
+        });
+        </script></body></html>
+        """,
+        did=did,
+        index=BASE_URL + "/index.html",
+    )
 
-    if banned:
-        return render_template_string("<h2>Blocked</h2><p>Your account is banned from the server.</p><p><a href='{{home}}'>Return</a></p>", home=BASE_URL), 403
-    if not is_member:
-        return render_template_string("<h2>Join required</h2><p>Please join the Discord server and try again.</p><p><a href='{{home}}'>Return</a></p>", home=BASE_URL), 403
-    if not has_role:
-        resp = make_response(render_template_string("<h2>Role missing</h2><p>Membership verified but required role missing.</p><p><a href='{{home}}'>Continue</a></p>", home=BASE_URL))
-        logging.info("Role missing; response headers BEFORE send: %s", dict(resp.headers))
-        return resp
 
-    resp = make_response(redirect(BASE_URL))
-    logging.info("SESSION SET for user %s; response headers BEFORE send: %s", did, dict(resp.headers))
-    return resp
+@app.route("/login/discord/callback")
+def discord_callback_login():
+    return _discord_callback()
 
+
+@app.route("/discord/callback")
+def discord_callback_plain():
+    return _discord_callback()
+
+# -------------------------
+# Portal / session / status
+# -------------------------
 @app.route("/portal/me")
 def portal_me():
     user = session.get("user")
@@ -358,129 +436,93 @@ def portal_me():
         return jsonify({"ok": False, "message": "Not logged in"}), 401
     return jsonify({"ok": True, "user": user}), 200
 
-@app.route("/status/<did>")
-def status(did):
-    if not is_valid_discord_id(did):
-        return jsonify({"ok": False, "role_granted": False, "message": "Invalid ID format"}), 400
-    if global_override:
-        return jsonify({"ok": True, "role_granted": True, "message": "GLOBAL OVERRIDE"}), 200
-    if admin_overrides.get(did):
-        return jsonify({"ok": True, "role_granted": True, "message": "ADMIN OVERRIDE"}), 200
-
-    banned = discord_is_banned(did)
-    member = discord_member(did)
-    if banned:
-        return jsonify({"ok": False, "role_granted": False, "message": "Banned from server"}), 403
-    if "roles" in member:
-        has = discord_has_role(member)
-        return jsonify({"ok": True, "role_granted": has, "message": ("Role present" if has else "Role missing")}), 200
-    return jsonify({"ok": False, "role_granted": False, "message": ("Not in server" if member.get("status_code") == 404 else f"Member lookup error ({member.get('status_code')})")}), 404
 
 @app.route("/logout")
 def logout():
     session.clear()
     return redirect(BASE_URL)
 
-def _make_key_value(did: str) -> str:
-    rnd = secrets.token_hex(24).upper()
-    return f"GMD-{did}-{rnd}"
 
+@app.route("/status/<did>")
+def status(did):
+    if global_override:
+        return jsonify({"ok": True, "role_granted": True, "message": "GLOBAL OVERRIDE ACTIVE"}), 200
+    if admin_overrides.get(did):
+        return jsonify({"ok": True, "role_granted": True, "message": "ADMIN OVERRIDE"}), 200
+
+    member = discord_member(did)
+    if "roles" in member:
+        has = discord_has_role(member)
+        return jsonify({"ok": True, "role_granted": has, "message": ("Role present" if has else "Role missing")}), 200
+    return jsonify({"ok": False, "role_granted": False, "message": f"Member lookup error (status {member.get('status_code')})"}), 404
+
+
+@app.route("/health")
+def health():
+    return jsonify({"ok": True, "ts": now_ts()}), 200
+
+# -------------------------
+# Key endpoints
+# -------------------------
 @app.route("/generate_key", methods=["POST"])
 def generate_key():
     user = session.get("user")
     if not user:
         return jsonify({"ok": False, "message": "Not logged in"}), 401
-    did = str(user.get("id") or "")
-    if not is_valid_discord_id(did):
-        return jsonify({"ok": False, "message": "Invalid user ID"}), 400
+    discord_id = str(user.get("id"))
+    try:
+        body = request.get_json(silent=True) or {}
+    except Exception:
+        body = {}
+    target_id = str(body.get("discord_id") or discord_id)
+    if target_id != discord_id and not require_owner():
+        return jsonify({"ok": False, "message": "Forbidden to generate for other IDs"}), 403
+    try:
+        key = create_unique_key(target_id)
+        return jsonify({"ok": True, "key": key}), 200
+    except Exception as e:
+        logging.exception("Key generation failed")
+        return jsonify({"ok": False, "message": "Key generation failed", "error": str(e)}), 500
 
-    member = discord_member(did)
-    if "roles" not in member:
-        return jsonify({"ok": False, "message": "Join the server before requesting a key"}), 403
-    if not (discord_has_role(member) or global_override or admin_overrides.get(did)):
-        return jsonify({"ok": False, "message": "Required role missing"}), 403
 
-    store = load_keys()
-    entry = store.get(did)
-    if entry and not entry.get("used"):
-        return jsonify({"ok": False, "message": "Active key already exists. Use it first."}), 409
-
-    key_value = _make_key_value(did)
-    store[did] = {
-        "key": key_value,
-        "used": False,
-        "created_at": now_ts(),
-        "used_at": None,
-        "audit": [{"ts": now_ts(), "event": "issued"}],
-    }
-    save_keys(store)
-    return jsonify({"ok": True, "key": key_value}), 200
-
-@app.route("/validate_key/<did>/<key>", methods=["GET", "POST"])
+@app.route("/validate_key/<path:did>/<path:key>", methods=["GET", "POST"])
 def validate_key(did, key):
-    did = str(did or "").strip()
-    key = str(key or "").strip()
-
-    def fail(status, msg):
-        return jsonify({"ok": False, "valid": False, "message": msg}), status
-
-    if not is_valid_discord_id(did):
-        return fail(400, "Invalid ID format")
-    if not key or not key.startswith(f"GMD-{did}-"):
-        return fail(400, "Malformed key")
-
     try:
-        if discord_is_banned(did):
-            return fail(403, "Banned from server")
+        did = unquote(did)
+        key = unquote(key)
     except Exception:
-        return fail(500, "Ban check failed")
+        return jsonify({"ok": False, "message": "Bad encoding"}), 400
 
-    try:
-        member = discord_member(did)
-    except Exception:
-        return fail(500, "Member lookup failed")
+    if KEY_PREFIX:
+        expected_prefix = f"{KEY_PREFIX}-{did}-"
+        if not key.startswith(expected_prefix):
+            return jsonify({"ok": False, "message": "Malformed key or mismatched discord id"}), 400
 
-    if "roles" not in member:
-        code = member.get("status_code")
-        if code == 404:
-            return fail(404, "Not in server")
-        return fail(502, f"Member lookup error ({code})")
+    ensure_key_table()
+    db = get_key_db()
+    row = db.execute("SELECT id, discord_id, consumed FROM issued_keys WHERE key_text = ?", (key,)).fetchone()
+    if not row:
+        return jsonify({"ok": False, "message": "Key not found"}), 404
 
-    has_role = False
-    try:
-        has_role = discord_has_role(member) or global_override or bool(admin_overrides.get(did))
-    except Exception:
-        has_role = False
+    if str(row["discord_id"]) != str(did):
+        return jsonify({"ok": False, "message": "Key does not belong to this ID"}), 400
 
-    if not has_role:
-        return fail(403, "Role missing")
+    if int(row["consumed"]):
+        return jsonify({"ok": False, "message": "Key already used"}), 410
 
-    try:
-        store = load_keys()
-    except Exception:
-        return fail(500, "Key store load failed")
-
-    entry = store.get(did)
-    if not entry:
-        return fail(404, "No key issued for this user")
-    if entry.get("used"):
-        return fail(410, "Key already used")
-    if str(entry.get("key")) != key:
-        return fail(400, "Incorrect key")
-
-    try:
-        entry["used"] = True
-        entry["used_at"] = now_ts()
-        audit = entry.get("audit", [])
-        audit.append({"ts": now_ts(), "event": "consumed"})
-        entry["audit"] = audit
-        store[did] = entry
-        save_keys(store)
-    except Exception:
-        return fail(500, "Failed to consume key")
+    cur = db.execute(
+        "UPDATE issued_keys SET consumed = 1, consumed_at = ? WHERE id = ? AND consumed = 0",
+        (now_ts(), row["id"]),
+    )
+    db.commit()
+    if cur.rowcount != 1:
+        return jsonify({"ok": False, "message": "Key already used"}), 410
 
     return jsonify({"ok": True, "valid": True, "message": "Key valid and consumed"}), 200
 
+# -------------------------
+# Overrides (owner only)
+# -------------------------
 @app.route("/override/all", methods=["GET", "POST", "DELETE"])
 def override_all():
     global global_override
@@ -498,6 +540,7 @@ def override_all():
         return jsonify({"ok": True, "global_override": False}), 200
     return jsonify({"ok": False, "message": "Method not allowed"}), 405
 
+
 @app.route("/override/<did>", methods=["GET", "POST", "DELETE"])
 def override_user(did):
     if not require_owner():
@@ -514,18 +557,64 @@ def override_user(did):
         return jsonify({"ok": True, "user_override": False, "discord_id": did}), 200
     return jsonify({"ok": False, "message": "Method not allowed"}), 405
 
-@app.route("/remove_role_now/<did>", methods=["POST"])
-def remove_role_now(did):
+
+@app.route("/override", methods=["GET"])
+def list_overrides():
+    if not require_owner():
+        return jsonify({"ok": False, "message": "Forbidden"}), 403
+    users = []
+    for did, info in admin_overrides.items():
+        users.append({"id": did, "username": info.get("username", ""), "discriminator": info.get("discriminator", "")})
+    return jsonify({"ok": True, "global_override": global_override, "users": users}), 200
+
+# -------------------------
+# Role add/remove helper (owner only)
+
+-------------------------
+def discordremoverole(did: str) -> bool:
+    if not DISCORDGUILDID or not DISCORDBOTTOKEN or not DISCORDROLEID:
+        return False
+    url = f"https://discord.com/api/guilds/{DISCORDGUILDID}/members/{did}/roles/{DISCORDROLEID}"
+    resp = requests.delete(url, headers={"Authorization": f"Bot {DISCORDBOTTOKEN}"}, timeout=15)
+    return resp.status_code in (200, 204)
+
+
+@app.route("/removerolenow/<did>", methods=["POST"])
+def removerolenow(did):
     if not require_owner():
         return jsonify({"ok": False, "message": "Forbidden"}), 403
     success = discordremoverole(did)
-    return jsonify({"ok": success, "discord_id": did}), (200 if success else 500)
+    status_code = 200 if success else 500
+    return jsonify({"ok": success, "discordid": did}), statuscode
 
-@app.route("/health")
-def health():
-    return jsonify({"ok": True, "ts": now_ts()}), 200
 
-# ----------------- MAIN -----------------
-if __name__ == "__main__":
+@app.route("/removeroleall", methods=["POST"])
+def removeroleall():
+    if not require_owner():
+        return jsonify({"ok": False, "message": "Forbidden"}), 403
+    if not DISCORDGUILDID or not DISCORDBOTTOKEN:
+        return jsonify({"ok": False, "message": "Missing guild or bot token"}), 400
+    url = f"https://discord.com/api/guilds/{DISCORDGUILDID}/members?limit=1000"
+    headers = {"Authorization": f"Bot {DISCORDBOTTOKEN}"}
+    resp = requests.get(url, headers=headers, timeout=15)
+    if resp.status_code != 200:
+        return jsonify({"ok": False, "message": "Failed to fetch members", "status": resp.status_code}), 500
+    members = safejson(resp)
+    removed, failed = [], []
+    for m in members:
+        did = str(m["user"]["id"])
+        r = requests.delete(f"https://discord.com/api/guilds/{DISCORDGUILDID}/members/{did}/roles/{DISCORDROLEID}", headers=headers, timeout=15)
+        if r.status_code in (200, 204):
+            removed.append(did)
+        else:
+            failed.append(did)
+    return jsonify({"ok": True, "removedcount": len(removed), "failedcount": len(failed), "removedsample": removed[:10], "failedsample": failed[:10]}), 200
+
+-------------------------
+
+Run server
+
+-------------------------
+if name == "main":
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port, debug=False)
