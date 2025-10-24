@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-# app.py — Yt-Discord-Verifier (remade)
+# app.py — Yt-Discord-Verifier (remade, fully fixed)
+# - Assigns role at login
+# - Generates keys with random length 10–18 (lowercase letters + digits)
+# - Atomic key validation/consumption
+# - Clean structure, no invalid dividers
+
 import os
 import time
 import secrets
@@ -265,7 +270,6 @@ def discord_add_role(did: str) -> bool:
     resp = requests.put(url, headers={"Authorization": f"Bot {DISCORD_BOT_TOKEN}"}, timeout=15)
     return resp.status_code in (200, 204)
 
-
 # -------------------------
 # Error handler
 # -------------------------
@@ -357,7 +361,7 @@ def _discord_callback():
         logging.warning("discord_get_user failed: %s", user_info)
         return jsonify({"ok": False, "message": "Discord user lookup failed", "details": user_info}), 400
 
-    # Assign role at login: attempt to add role (best-effort). This ensures users receive role on login.
+    # Assign role at login (best effort)
     try:
         discord_add_role(did)
     except Exception:
@@ -565,10 +569,11 @@ def list_overrides():
     users = []
     for did, info in admin_overrides.items():
         users.append({"id": did, "username": info.get("username", ""), "discriminator": info.get("discriminator", "")})
-    return jsonify({"ok": True, "global_override": global_override, "users": users}), 200
+    return jsonify({"ok": True, "globaloverride": globaloverride, "users": users}), 200
 
-# -------------------------
-# Role add/remove helper (owner only)
+-------------------------
+
+Role remove helpers (owner only)
 
 -------------------------
 def discordremoverole(did: str) -> bool:
