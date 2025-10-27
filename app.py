@@ -483,35 +483,43 @@ def logout():
 
 @app.route("/status/<did>")
 def status(did):
+    # Global override: force allow
     if global_override:
         return jsonify({
             "ok": True,
             "member": True,
+            "role_granted": True,
             "username": "GLOBAL_OVERRIDE",
             "message": "GLOBAL OVERRIDE ACTIVE"
         }), 200
 
+    # Admin override: force allow for specific IDs
     if admin_overrides.get(did):
         return jsonify({
             "ok": True,
             "member": True,
+            "role_granted": True,
             "username": "ADMIN_OVERRIDE",
             "message": "ADMIN OVERRIDE"
         }), 200
 
+    # Normal member lookup
     member = discord_member(did)
     if "user" in member:
         username = member.get("user", {}).get("username", "")
         return jsonify({
             "ok": True,
             "member": True,
+            "role_granted": True,  # always true now, no role check
             "username": username,
             "message": f"Welcome {username}! Don’t forget to get your key from the website."
         }), 200
 
+    # If lookup failed
     return jsonify({
         "ok": False,
         "member": False,
+        "role_granted": False,
         "message": f"Member lookup error (status {member.get('status_code')})"
     }), 404
 
