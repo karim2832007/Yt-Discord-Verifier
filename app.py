@@ -260,6 +260,11 @@ def handle_exception(e):
     logging.exception("Unhandled exception:")
     return jsonify({"ok": False, "error": str(e)}), 500
 
+@app.route("/portal/me}")
+def portal_me_redirect():
+    # Redirect any accidental /portal/me} requests to the correct page
+    return redirect("/portal/me", code=302)
+
 # -----------------------------------------------------------------------------
 # Serve id.js at same level as app.py
 # -----------------------------------------------------------------------------
