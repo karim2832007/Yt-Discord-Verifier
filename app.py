@@ -265,6 +265,59 @@ def portal_me_redirect():
     # Redirect any accidental /portal/me} requests to the correct page
     return redirect("/portal/me", code=302)
 
+@app.route("/favicon.ico")
+def favicon():
+    # Return empty 204 so browsers stop logging 500s
+    return "", 204
+
+
+import secrets
+
+@app.route("/generate_key", methods=["POST"])
+def generate_key():
+    try:
+        user = session.get("user")
+        if not user:
+            return jsonify({"ok": False, "message": "Not logged in"}), 401
+
+        did = str(user.get("id"))
+        username = user.get("username", "")
+
+        # Check if user already has an active key
+        existing = get_active_key_for_user(did)
+        if existing:
+            return jsonify({
+                "ok": True,
+                "key": existing,
+                "message": f"Welcome back {username}, here’s your active key."
+            }), 200
+
+        # Generate a fully random key (no prefix, no DID)
+        new_key = create_new_key(did)
+        return jsonify({
+            "ok": True,
+            "key": new_key,
+            "message": f"Welcome {username}, here’s your new key."
+        }), 200
+
+    except Exception as e:
+        app.logger.exception("Key generation failed")
+        return jsonify({
+            "ok": False,
+            "message": f"Server error: {str(e)}"
+        }), 500
+
+
+def get_active_key_for_user(did: str):
+    # TODO: look up in your DB or storage
+    return None
+
+
+def create_new_key(did: str):
+    # Generate a 32‑character random URL‑safe string
+    return secrets.token_urlsafe(24)
+
+
 # -----------------------------------------------------------------------------
 # Serve id.js at same level as app.py
 # -----------------------------------------------------------------------------
