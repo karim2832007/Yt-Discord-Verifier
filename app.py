@@ -10,7 +10,7 @@ import json
 from datetime import timedelta
 
 import requests
-from flask import Flask, redirect, request, session, jsonify, render_template_string
+from flask import Flask, redirect, request, session, jsonify, render_template_string, send_from_directory
 from dotenv import load_dotenv
 from flask_cors import CORS
 
@@ -26,8 +26,8 @@ app.permanent_session_lifetime = timedelta(days=1)
 SESSION_COOKIE_DOMAIN = os.environ.get("SESSION_COOKIE_DOMAIN", None)
 app.config.update(
     SESSION_COOKIE_DOMAIN=SESSION_COOKIE_DOMAIN,
-    SESSION_COOKIE_SECURE=True,
-    SESSION_COOKIE_SAMESITE="None",
+    SESSION_COOKIE_SECURE=True,       # requires HTTPS
+    SESSION_COOKIE_SAMESITE="None",   # allows cross-site OAuth
     PROPAGATE_EXCEPTIONS=True,
 )
 
@@ -58,7 +58,7 @@ global_override = False
 admin_overrides = {}
 login_history = []
 STATE_FILE = "override_state.json"
-STATE_TTL = 15 * 60
+STATE_TTL = 15 * 60  # state validity in seconds
 
 def save_state():
     try:
@@ -79,6 +79,7 @@ def load_state():
         logging.exception("Failed to load state")
 
 load_state()
+
 # app.py — Part 2/6
 # -----------------------------------------------------------------------------
 # Helpers
@@ -128,6 +129,10 @@ UA = "GamingMods-Verifier/1.0 (+https://gaming-mods.com)"
 # Rate-limit aware Discord helpers
 # -----------------------------------------------------------------------------
 def discord_exchange_token(code: str, redirect_uri: str) -> dict:
+    """
+    Exchanges OAuth code for tokens. Handles 429 with backoff and returns
+    structured error when Retry-After is large (so we can show a friendly page).
+    """
     url = "https://discord.com/api/oauth2/token"
     data = {
         "client_id": DISCORD_CLIENT_ID,
@@ -196,6 +201,10 @@ def discord_exchange_token(code: str, redirect_uri: str) -> dict:
 
 # app.py — Part 3/6
 def discord_get_user(token: str) -> dict:
+    """
+    Fetches /users/@me and handles 429 explicitly. Caller should branch
+    UI when {'error': 'rate_limited'} is returned.
+    """
     url = "https://discord.com/api/users/@me"
     headers = {"Authorization": f"Bearer {token}", "User-Agent": UA}
 
@@ -251,6 +260,15 @@ def handle_exception(e):
     logging.exception("Unhandled exception:")
     return jsonify({"ok": False, "error": str(e)}), 500
 
+# -----------------------------------------------------------------------------
+# Serve id.js at same level as app.py
+# -----------------------------------------------------------------------------
+@app.route("/id.js")
+def serve_id_js():
+    # id.js must be in the same directory as app.py
+    here = os.path.dirname(os.path.abspath(__file__))
+    return send_from_directory(here, "id.js")
+
 # app.py — Part 4/6
 # -----------------------------------------------------------------------------
 # Front-end redirects
@@ -284,7 +302,7 @@ def admin_logins():
     return jsonify({"ok": True, "logins": login_history}), 200
 
 # -----------------------------------------------------------------------------
-# OAuth endpoints (mobile-friendly pages)
+# Mobile-friendly HTML snippets
 # -----------------------------------------------------------------------------
 MOBILE_CSS = """
 :root{--bg:#0b0b0b;--card:#121212;--fg:#eee;--muted:#bbb;--accent:#d4af37;--btn:#1a73e8}
@@ -349,6 +367,7 @@ def login_error_page(title: str, brief: str, body_preview: str, index_link: str)
     ), 400
 
 def id_gate_page(did: str, index_link: str):
+    # id.js is served via /id.js with data-target carrying index_link
     return render_template_string(
         f"""<!doctype html><html><head>
 <meta charset="utf-8"/>
@@ -368,30 +387,11 @@ def id_gate_page(did: str, index_link: str):
   </div>
 </div>
 </main>
-<script>
-const didInput = document.getElementById('did');
-const copyBtn = document.getElementById('copy');
-const contBtn = document.getElementById('continue');
-const TARGET = "{index_link}";
-copyBtn.addEventListener('click', async () => {
-  try {
-    await navigator.clipboard.writeText(didInput.value);
-    copyBtn.textContent = 'Copied!';
-    contBtn.disabled = false;
-  } catch (e) {
-    didInput.select();
-    copyBtn.textContent = 'Select & copy';
-    contBtn.disabled = false;
-  }
-});
-contBtn.addEventListener('click', () => {
-  const sep = TARGET.includes('?') ? '&' : '?';
-  location.href = TARGET + sep + 'discord_id=' + encodeURIComponent(didInput.value);
-});
-</script>
+<script src="/id.js" data-target="{index_link}"></script>
 </body></html>"""
     )
 
+# app.py — Part 5/6
 @app.route("/login/discord")
 def login_discord():
     state = make_state()
@@ -405,7 +405,6 @@ def login_discord():
     )
     return redirect(auth_url)
 
-# app.py — Part 5/6
 def _discord_callback():
     state = request.args.get("state", "")
     code = request.args.get("code", "")
@@ -469,7 +468,7 @@ def discord_callback_plain():
     return _discord_callback()
 
 # -----------------------------------------------------------------------------
-# Session / Portal / Logout / Status
+# Session / Portal / Logout / Status / Health
 # -----------------------------------------------------------------------------
 @app.route("/portal/me")
 def portal_me():
