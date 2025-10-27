@@ -263,11 +263,12 @@ def handle_exception(e):
 # -----------------------------------------------------------------------------
 # Serve id.js at same level as app.py
 # -----------------------------------------------------------------------------
+from flask import send_from_directory
+
 @app.route("/id.js")
 def serve_id_js():
-    # id.js must be in the same directory as app.py
     here = os.path.dirname(os.path.abspath(__file__))
-    return send_from_directory(here, "id.js")
+    return send_from_directory(here, "id.js")  # ✅ fixed helper name
 
 # app.py — Part 4/6
 # -----------------------------------------------------------------------------
@@ -483,7 +484,7 @@ def logout():
 
 @app.route("/status/<did>")
 def status(did):
-    # Global override: force allow
+    # Global override
     if global_override:
         return jsonify({
             "ok": True,
@@ -493,7 +494,7 @@ def status(did):
             "message": "GLOBAL OVERRIDE ACTIVE"
         }), 200
 
-    # Admin override: force allow for specific IDs
+    # Admin override
     if admin_overrides.get(did):
         return jsonify({
             "ok": True,
@@ -510,12 +511,12 @@ def status(did):
         return jsonify({
             "ok": True,
             "member": True,
-            "role_granted": True,  # always true now, no role check
+            "role_granted": True,  # ✅ always true now
             "username": username,
             "message": f"Welcome {username}! Don’t forget to get your key from the website."
         }), 200
 
-    # If lookup failed
+    # Lookup failed
     return jsonify({
         "ok": False,
         "member": False,
