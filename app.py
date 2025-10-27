@@ -484,14 +484,36 @@ def logout():
 @app.route("/status/<did>")
 def status(did):
     if global_override:
-        return jsonify({"ok": True, "role_granted": True, "message": "GLOBAL OVERRIDE ACTIVE"}), 200
+        return jsonify({
+            "ok": True,
+            "member": True,
+            "username": "GLOBAL_OVERRIDE",
+            "message": "GLOBAL OVERRIDE ACTIVE"
+        }), 200
+
     if admin_overrides.get(did):
-        return jsonify({"ok": True, "role_granted": True, "message": "ADMIN OVERRIDE"}), 200
+        return jsonify({
+            "ok": True,
+            "member": True,
+            "username": "ADMIN_OVERRIDE",
+            "message": "ADMIN OVERRIDE"
+        }), 200
+
     member = discord_member(did)
-    if "roles" in member:
-        has = discord_has_role(member)
-        return jsonify({"ok": True, "role_granted": has, "message": ("Role present" if has else "Role missing")}), 200
-    return jsonify({"ok": False, "role_granted": False, "message": f"Member lookup error (status {member.get('status_code')})"}), 404
+    if "user" in member:
+        username = member.get("user", {}).get("username", "")
+        return jsonify({
+            "ok": True,
+            "member": True,
+            "username": username,
+            "message": f"Welcome {username}! Don’t forget to get your key from the website."
+        }), 200
+
+    return jsonify({
+        "ok": False,
+        "member": False,
+        "message": f"Member lookup error (status {member.get('status_code')})"
+    }), 404
 
 @app.route("/health")
 def health():
