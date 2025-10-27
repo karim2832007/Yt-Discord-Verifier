@@ -367,7 +367,6 @@ def login_error_page(title: str, brief: str, body_preview: str, index_link: str)
     ), 400
 
 def id_gate_page(did: str, index_link: str):
-    # id.js is served via /id.js with data-target carrying index_link
     return render_template_string(
         f"""<!doctype html><html><head>
 <meta charset="utf-8"/>
@@ -383,7 +382,7 @@ def id_gate_page(did: str, index_link: str):
     <button class="button" id="copy">Copy</button>
   </div>
   <div class="row">
-    <button class="alt button" id="continue">Continue</button>
+    <button class="alt button" id="continue" disabled>Continue</button>
   </div>
 </div>
 </main>
