@@ -274,8 +274,40 @@ def favicon():
     return "", 204
 
 
-# In‑memory key store: { key: {"did": str, "expires_at": float} }
-issued_keys = {}
+import secrets, time, sqlite3
+from flask import jsonify, session
+
+DB_PATH = "keys.db"
+
+# Ensure table exists
+def init_db():
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS issued_keys (
+                key TEXT PRIMARY KEY,
+                did TEXT NOT NULL,
+                expires_at REAL NOT NULL
+            )
+        """)
+init_db()
+
+def create_new_key(did: str):
+    """Invalidate old keys for this DID and create a new one with 24h expiry."""
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute("DELETE FROM issued_keys WHERE did = ?", (did,))
+        key = secrets.token_urlsafe(24)
+        expires_at = time.time() + 24*60*60
+        conn.execute("INSERT INTO issued_keys (key, did, expires_at) VALUES (?, ?, ?)",
+                     (key, did, expires_at))
+        conn.commit()
+    return key
+
+def get_key_record(key: str):
+    with sqlite3.connect(DB_PATH) as conn:
+        row = conn.execute("SELECT did, expires_at FROM issued_keys WHERE key = ?", (key,)).fetchone()
+        if row:
+            return {"did": row[0], "expires_at": row[1]}
+        return None
 
 @app.route("/generate_key", methods=["POST"])
 def generate_key_route():
@@ -287,7 +319,6 @@ def generate_key_route():
         did = str(user.get("id"))
         username = user.get("username", "")
 
-        # Always create a new key, and invalidate any old ones for this DID
         new_key = create_new_key(did)
         return jsonify({
             "ok": True,
@@ -299,27 +330,22 @@ def generate_key_route():
         app.logger.exception("Key generation failed")
         return jsonify({"ok": False, "message": f"Server error: {str(e)}"}), 500
 
-
 @app.route("/validate_key/<did>/<key>")
 def validate_key_route(did, key):
     try:
-        record = issued_keys.get(key)
+        record = get_key_record(key)
         if not record:
             return jsonify({"ok": False, "valid": False, "message": "Key not found"}), 400
         if record["did"] != did:
             return jsonify({"ok": False, "valid": False, "message": "Key does not belong to this ID"}), 403
-
-        # Check expiry
         if time.time() > record["expires_at"]:
             return jsonify({"ok": False, "valid": False, "message": "Key expired"}), 410
 
-        # Still valid
         return jsonify({"ok": True, "valid": True, "message": "Key validated successfully"}), 200
 
     except Exception as e:
         app.logger.exception("Validation failed")
         return jsonify({"ok": False, "valid": False, "message": f"Server error: {str(e)}"}), 500
-
 
 # -------------------------------------------------------------------
 # Helper functions
