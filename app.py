@@ -273,6 +273,31 @@ def favicon():
 
 import secrets
 
+@app.route("/validate_key/<did>/<key>")
+def validate_key(did, key):
+    try:
+        # TODO: replace with real DB lookup
+        if not key_exists_for_user(did, key):
+            return jsonify({
+                "ok": False,
+                "message": "Invalid or expired key"
+            }), 400
+
+        # Mark key as used
+        consume_key(did, key)
+
+        return jsonify({
+            "ok": True,
+            "message": "Key validated successfully"
+        }), 200
+
+    except Exception as e:
+        app.logger.exception("Validation failed")
+        return jsonify({
+            "ok": False,
+            "message": f"Server error: {str(e)}"
+        }), 500
+
 @app.route("/generate_key", methods=["POST"])
 def generate_key():
     try:
