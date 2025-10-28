@@ -287,16 +287,7 @@ def generate_key_route():
         did = str(user.get("id"))
         username = user.get("username", "")
 
-        # If user already has an active (unexpired) key, return it
-        existing = get_active_key_for_user(did)
-        if existing:
-            return jsonify({
-                "ok": True,
-                "key": existing,
-                "message": f"Welcome back {username}, here’s your active key."
-            }), 200
-
-        # Otherwise, create a new key with 24h expiry
+        # Always create a new key, and invalidate any old ones for this DID
         new_key = create_new_key(did)
         return jsonify({
             "ok": True,
@@ -334,17 +325,15 @@ def validate_key_route(did, key):
 # Helper functions
 # -------------------------------------------------------------------
 
-def get_active_key_for_user(did: str):
-    """Return an unexpired key for this Discord ID if one exists."""
-    now = time.time()
-    for k, rec in issued_keys.items():
-        if rec["did"] == did and rec["expires_at"] > now:
-            return k
-    return None
-
-
 def create_new_key(did: str):
-    """Generate and store a new key with 24h expiry for this Discord ID."""
+    """Generate and store a new key with 24h expiry for this Discord ID.
+       Any old keys for this DID are invalidated immediately."""
+    # Cleanup: remove any existing keys for this DID
+    to_delete = [k for k, rec in issued_keys.items() if rec["did"] == did]
+    for k in to_delete:
+        issued_keys.pop(k, None)
+
+    # Generate a fresh random key
     key = secrets.token_urlsafe(24)
     issued_keys[key] = {
         "did": did,
