@@ -10,9 +10,12 @@ import json
 from datetime import timedelta
 
 import requests
-from flask import Flask, redirect, request, session, jsonify, render_template_string, send_from_directory
-from dotenv import load_dotenv
+from flask import (
+    Flask, redirect, request, session, jsonify,
+    render_template_string, send_from_directory
+)
 from flask_cors import CORS
+from dotenv import load_dotenv
 
 # -----------------------------------------------------------------------------
 # App config
@@ -271,35 +274,12 @@ def favicon():
     return "", 204
 
 
-import secrets
 
-@app.route("/validate_key/<did>/<key>")
-def validate_key(did, key):
-    try:
-        # TODO: replace with real DB lookup
-        if not key_exists_for_user(did, key):
-            return jsonify({
-                "ok": False,
-                "message": "Invalid or expired key"
-            }), 400
-
-        # Mark key as used
-        consume_key(did, key)
-
-        return jsonify({
-            "ok": True,
-            "message": "Key validated successfully"
-        }), 200
-
-    except Exception as e:
-        app.logger.exception("Validation failed")
-        return jsonify({
-            "ok": False,
-            "message": f"Server error: {str(e)}"
-        }), 500
+# In‑memory key store: { key: {"did": str, "used": bool} }
+issued_keys = {}
 
 @app.route("/generate_key", methods=["POST"])
-def generate_key():
+def generate_key_route():
     try:
         user = session.get("user")
         if not user:
@@ -327,21 +307,47 @@ def generate_key():
 
     except Exception as e:
         app.logger.exception("Key generation failed")
-        return jsonify({
-            "ok": False,
-            "message": f"Server error: {str(e)}"
-        }), 500
+        return jsonify({"ok": False, "message": f"Server error: {str(e)}"}), 500
 
+
+@app.route("/validate_key/<did>/<key>")
+def validate_key_route(did, key):
+    try:
+        record = issued_keys.get(key)
+        if not record:
+            return jsonify({"ok": False, "valid": False, "message": "Key not found"}), 400
+        if record["used"]:
+            return jsonify({"ok": False, "valid": False, "message": "Key already used"}), 410
+        if record["did"] != did:
+            return jsonify({"ok": False, "valid": False, "message": "Key does not belong to this ID"}), 403
+
+        # Mark key as used
+        record["used"] = True
+
+        return jsonify({"ok": True, "valid": True, "message": "Key validated successfully"}), 200
+
+    except Exception as e:
+        app.logger.exception("Validation failed")
+        return jsonify({"ok": False, "valid": False, "message": f"Server error: {str(e)}"}), 500
+
+
+# -------------------------------------------------------------------
+# Helper functions
+# -------------------------------------------------------------------
 
 def get_active_key_for_user(did: str):
-    # TODO: look up in your DB or storage
+    """Return an unused key for this Discord ID if one exists."""
+    for k, rec in issued_keys.items():
+        if rec["did"] == did and not rec["used"]:
+            return k
     return None
 
 
 def create_new_key(did: str):
-    # Generate a 32‑character random URL‑safe string
-    return secrets.token_urlsafe(24)
-
+    """Generate and store a new key for this Discord ID."""
+    key = secrets.token_urlsafe(24)
+    issued_keys[key] = {"did": did, "used": False}
+    return key
 
 # -----------------------------------------------------------------------------
 # Serve id.js at same level as app.py
