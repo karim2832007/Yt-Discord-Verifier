@@ -426,28 +426,8 @@ def login_error_page(title: str, brief: str, body_preview: str, index_link: str)
     ), 400
 
 def id_gate_page(did: str, index_link: str):
-    return render_template_string(
-        f"""<!doctype html><html><head>
-<meta charset="utf-8"/>
-<meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>Confirm Discord ID</title>
-<style>{MOBILE_CSS}</style>
-</head><body><main>
-<div class="card">
-  <h2>Login successful</h2>
-  <p>Copy your Discord ID, then continue to the site. On mobile, tap to copy.</p>
-  <div class="copy">
-    <input id="did" value="{did}" readonly/>
-    <button class="button" id="copy">Copy</button>
-  </div>
-  <div class="row">
-    <button class="alt button" id="continue" disabled>Continue</button>
-  </div>
-</div>
-</main>
-<script src="/id.js" data-target="{index_link}"></script>
-</body></html>"""
-    )
+    # Instead of showing the Copy ID page, just redirect back to your site
+    return redirect(f"{index_link}?discord_id={did}", code=302)
 
 # app.py — Part 5/6
 @app.route("/login/discord")
@@ -515,8 +495,9 @@ def _discord_callback():
     }
     login_history.append(session["user"])
 
-    return id_gate_page(did, IONOS_INDEX)
-
+    # ✅ Instead of showing the Copy ID page, redirect straight back to your site
+    return redirect(f"{IONOS_INDEX}?discord_id={did}", code=302)
+    
 @app.route("/login/discord/callback")
 def discord_callback_login():
     return _discord_callback()
