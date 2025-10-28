@@ -274,8 +274,7 @@ def favicon():
     return "", 204
 
 
-
-# In‑memory key store: { key: {"did": str, "used": bool} }
+# In‑memory key store: { key: {"did": str, "expires_at": float} }
 issued_keys = {}
 
 @app.route("/generate_key", methods=["POST"])
@@ -288,7 +287,7 @@ def generate_key_route():
         did = str(user.get("id"))
         username = user.get("username", "")
 
-        # Check if user already has an active key
+        # If user already has an active (unexpired) key, return it
         existing = get_active_key_for_user(did)
         if existing:
             return jsonify({
@@ -297,7 +296,7 @@ def generate_key_route():
                 "message": f"Welcome back {username}, here’s your active key."
             }), 200
 
-        # Generate a fully random key (no prefix, no DID)
+        # Otherwise, create a new key with 24h expiry
         new_key = create_new_key(did)
         return jsonify({
             "ok": True,
@@ -316,14 +315,14 @@ def validate_key_route(did, key):
         record = issued_keys.get(key)
         if not record:
             return jsonify({"ok": False, "valid": False, "message": "Key not found"}), 400
-        if record["used"]:
-            return jsonify({"ok": False, "valid": False, "message": "Key already used"}), 410
         if record["did"] != did:
             return jsonify({"ok": False, "valid": False, "message": "Key does not belong to this ID"}), 403
 
-        # Mark key as used
-        record["used"] = True
+        # Check expiry
+        if time.time() > record["expires_at"]:
+            return jsonify({"ok": False, "valid": False, "message": "Key expired"}), 410
 
+        # Still valid
         return jsonify({"ok": True, "valid": True, "message": "Key validated successfully"}), 200
 
     except Exception as e:
@@ -336,18 +335,23 @@ def validate_key_route(did, key):
 # -------------------------------------------------------------------
 
 def get_active_key_for_user(did: str):
-    """Return an unused key for this Discord ID if one exists."""
+    """Return an unexpired key for this Discord ID if one exists."""
+    now = time.time()
     for k, rec in issued_keys.items():
-        if rec["did"] == did and not rec["used"]:
+        if rec["did"] == did and rec["expires_at"] > now:
             return k
     return None
 
 
 def create_new_key(did: str):
-    """Generate and store a new key for this Discord ID."""
+    """Generate and store a new key with 24h expiry for this Discord ID."""
     key = secrets.token_urlsafe(24)
-    issued_keys[key] = {"did": did, "used": False}
+    issued_keys[key] = {
+        "did": did,
+        "expires_at": time.time() + 24*60*60  # 24 hours from now
+    }
     return key
+
 
 # -----------------------------------------------------------------------------
 # Serve id.js at same level as app.py
