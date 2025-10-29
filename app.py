@@ -274,6 +274,8 @@ def favicon():
     return "", 204
 
 
+# --- REPLACEMENT: SQLite-only keys with single-use + admin override ---
+
 import secrets, time, sqlite3
 from flask import jsonify, session
 
@@ -286,28 +288,42 @@ def init_db():
             CREATE TABLE IF NOT EXISTS issued_keys (
                 key TEXT PRIMARY KEY,
                 did TEXT NOT NULL,
-                expires_at REAL NOT NULL
+                expires_at REAL NOT NULL,
+                used INTEGER NOT NULL DEFAULT 0
             )
         """)
 init_db()
 
 def create_new_key(did: str):
-    """Invalidate old keys for this DID and create a new one with 24h expiry."""
+    """Invalidate old keys for this DID and create a new single-use key with 24h expiry."""
     with sqlite3.connect(DB_PATH) as conn:
+        # Remove any previous keys for this DID
         conn.execute("DELETE FROM issued_keys WHERE did = ?", (did,))
+        # Create fresh key
         key = secrets.token_urlsafe(24)
         expires_at = time.time() + 24*60*60
-        conn.execute("INSERT INTO issued_keys (key, did, expires_at) VALUES (?, ?, ?)",
-                     (key, did, expires_at))
+        conn.execute(
+            "INSERT INTO issued_keys (key, did, expires_at, used) VALUES (?, ?, ?, 0)",
+            (key, did, expires_at)
+        )
         conn.commit()
     return key
 
 def get_key_record(key: str):
     with sqlite3.connect(DB_PATH) as conn:
-        row = conn.execute("SELECT did, expires_at FROM issued_keys WHERE key = ?", (key,)).fetchone()
+        row = conn.execute(
+            "SELECT did, expires_at, used FROM issued_keys WHERE key = ?",
+            (key,)
+        ).fetchone()
         if row:
-            return {"did": row[0], "expires_at": row[1]}
+            return {"did": row[0], "expires_at": row[1], "used": row[2]}
         return None
+
+def burn_key(key: str):
+    """Delete the key to enforce single-use and keep key.html clean."""
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute("DELETE FROM issued_keys WHERE key = ?", (key,))
+        conn.commit()
 
 @app.route("/generate_key", methods=["POST"])
 def generate_key_route():
@@ -333,102 +349,7 @@ def generate_key_route():
 @app.route("/validate_key/<did>/<key>")
 def validate_key_route(did, key):
     try:
-        record = get_key_record(key)
-        if not record:
-            return jsonify({"ok": False, "valid": False, "message": "Key not found"}), 400
-        if record["did"] != did:
-            return jsonify({"ok": False, "valid": False, "message": "Key does not belong to this ID"}), 403
-        if time.time() > record["expires_at"]:
-            return jsonify({"ok": False, "valid": False, "message": "Key expired"}), 410
-
-        return jsonify({"ok": True, "valid": True, "message": "Key validated successfully"}), 200
-
-    except Exception as e:
-        app.logger.exception("Validation failed")
-        return jsonify({"ok": False, "valid": False, "message": f"Server error: {str(e)}"}), 500
-
-# -------------------------------------------------------------------
-# Helper functions
-# -------------------------------------------------------------------
-
-def create_new_key(did: str):
-    """Generate and store a new key with 24h expiry for this Discord ID.
-       Any old keys for this DID are invalidated immediately."""
-    # Cleanup: remove any existing keys for this DID
-    to_delete = [k for k, rec in issued_keys.items() if rec["did"] == did]
-    for k in to_delete:
-        issued_keys.pop(k, None)
-
-    # Generate a fresh random key
-    key = secrets.token_urlsafe(24)
-    issued_keys[key] = {
-        "did": did,
-        "expires_at": time.time() + 24*60*60  # 24 hours from now
-    }
-    return key
-
-
-# -----------------------------------------------------------------------------
-# Serve id.js at same level as app.py
-# -----------------------------------------------------------------------------
-from flask import send_from_directory
-
-@app.route("/id.js")
-def serve_id_js():
-    here = os.path.dirname(os.path.abspath(__file__))
-    return send_from_directory(here, "id.js")  # ✅ fixed helper name
-
-# app.py — Part 4/6
-# -----------------------------------------------------------------------------
-# Front-end redirects
-# -----------------------------------------------------------------------------
-@app.route("/")
-def serve_index():
-    return redirect(IONOS_INDEX)
-
-@app.route("/admin")
-def serve_admin():
-    if not require_owner():
-        return "Forbidden", 403
-    return redirect(IONOS_ADMIN)
-
-@app.route("/games")
-def serve_games():
-    return redirect(IONOS_GAMES)
-
-@app.route("/privacy")
-def serve_privacy():
-    return redirect(IONOS_PRIVACY)
-
-@app.route("/donate")
-def serve_donate():
-    return redirect(IONOS_DONATE)
-
-@app.route("/admin/logins")
-def admin_logins():
-    if not require_owner():
-        return jsonify({"ok": False, "message": "Forbidden"}), 403
-    return jsonify({"ok": True, "logins": login_history}), 200
-
-
-
-issued_keys = {}
-
-@app.route("/generate_key", methods=["POST"])
-def generate_key():
-    data = request.get_json(silent=True) or {}
-    did = (data.get("discord_id") or "").strip()
-    if not did:
-        return jsonify({"ok": False, "message": "Missing Discord ID"}), 400
-
-    key = secrets.token_urlsafe(16)
-    issued_keys[key] = {"did": did, "used": False}
-    return jsonify({"ok": True, "key": key, "message": "Key generated"}), 200
-
-@app.route("/validate_key/<did>/<key>")
-def validate_key_route(did, key):
-    try:
-        # 🔑 Admin override: accept anything
+        # Admin override: accept anything (requires global_override/admin_overrides defined elsewhere)
         if global_override or admin_overrides.get(did):
             return jsonify({
                 "ok": True,
@@ -436,16 +357,28 @@ def validate_key_route(did, key):
                 "message": "ADMIN OVERRIDE ACTIVE – any key accepted"
             }), 200
 
-        # Normal validation logic here...
         record = get_key_record(key)
         if not record:
             return jsonify({"ok": False, "valid": False, "message": "Key not found"}), 400
+
+        # ID binding
         if record["did"] != did:
             return jsonify({"ok": False, "valid": False, "message": "Key does not belong to this ID"}), 403
+
+        # Expired → delete
         if time.time() > record["expires_at"]:
+            burn_key(key)
             return jsonify({"ok": False, "valid": False, "message": "Key expired"}), 410
 
+        # Already used → delete
+        if record["used"]:
+            burn_key(key)
+            return jsonify({"ok": False, "valid": False, "message": "Key already used"}), 410
+
+        # First valid use → burn immediately (single-use)
+        burn_key(key)
         return jsonify({"ok": True, "valid": True, "message": "Key validated successfully"}), 200
+
     except Exception as e:
         app.logger.exception("Validation failed")
         return jsonify({"ok": False, "valid": False, "message": f"Server error: {str(e)}"}), 500
