@@ -426,17 +426,29 @@ def generate_key():
     return jsonify({"ok": True, "key": key, "message": "Key generated"}), 200
 
 @app.route("/validate_key/<did>/<key>")
-def validate_key(did, key):
-    record = issued_keys.get(key)
-    if not record:
-        return jsonify({"ok": False, "valid": False, "message": "Key not found"}), 400
-    if record["used"]:
-        return jsonify({"ok": False, "valid": False, "message": "Key already used"}), 410
-    if record["did"] != did:
-        return jsonify({"ok": False, "valid": False, "message": "Key does not belong to this ID"}), 403
+def validate_key_route(did, key):
+    try:
+        # 🔑 Admin override: accept anything
+        if global_override or admin_overrides.get(did):
+            return jsonify({
+                "ok": True,
+                "valid": True,
+                "message": "ADMIN OVERRIDE ACTIVE – any key accepted"
+            }), 200
 
-    record["used"] = True
-    return jsonify({"ok": True, "valid": True, "message": "Key validated successfully"}), 200
+        # Normal validation logic here...
+        record = get_key_record(key)
+        if not record:
+            return jsonify({"ok": False, "valid": False, "message": "Key not found"}), 400
+        if record["did"] != did:
+            return jsonify({"ok": False, "valid": False, "message": "Key does not belong to this ID"}), 403
+        if time.time() > record["expires_at"]:
+            return jsonify({"ok": False, "valid": False, "message": "Key expired"}), 410
+
+        return jsonify({"ok": True, "valid": True, "message": "Key validated successfully"}), 200
+    except Exception as e:
+        app.logger.exception("Validation failed")
+        return jsonify({"ok": False, "valid": False, "message": f"Server error: {str(e)}"}), 500
 
 # -----------------------------------------------------------------------------
 # Mobile-friendly HTML snippets
