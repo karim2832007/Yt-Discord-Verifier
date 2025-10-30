@@ -656,22 +656,39 @@ def purge_keys():
         app.logger.exception("purge_keys failed")
         return jsonify({"ok": False, "message": "server error"}), 500
 
+from flask import jsonify
+
+# Debug: confirm env vars are loaded
 @app.route("/debug/env")
 def debug_env():
-    return {
+    return jsonify({
         "base": LOOTLABS_API_BASE,
         "key_loaded": bool(LOOTLABS_API_KEY)  # don’t print the key itself
-    }
+    })
 
-@app.route("/lootlabs/test")
-def lootlabs_test():
+# Test: call LootLabs API with your key
+@app.route("/debug/lootlabs")
+def debug_lootlabs():
     url = f"{LOOTLABS_API_BASE}/content_locker"
-    headers = {"Authorization": f"Bearer {LOOTLABS_API_KEY}"}
+    headers = {
+        "Authorization": f"Bearer {LOOTLABS_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "title": "Debug Locker",
+        "url": "https://gaming-mods.com",
+        "tier_id": 1,
+        "number_of_tasks": 1
+    }
     try:
-        r = requests.get(url, headers=headers, timeout=10)
-        return {"status": r.status_code, "body": r.text}
+        r = requests.post(url, headers=headers, json=payload, timeout=10)
+        return jsonify({
+            "status": r.status_code,
+            "body": r.json() if r.headers.get("content-type","").startswith("application/json") else r.text
+        })
     except Exception as e:
-        return {"error": str(e)}, 500
+        return jsonify({"error": str(e)}), 500
+
 
 # -----------------------------------------------------------------------------
 # Run
