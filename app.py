@@ -169,6 +169,15 @@ def require_owner() -> bool:
         return False
     return str(user.get("id")) == str(owner)
 
+def list_keys_for_did(did: str) -> list:
+    with sqlite3.connect(DB_PATH) as conn:
+        rows = conn.execute(
+            "SELECT key, expires_at FROM issued_keys WHERE did = ? ORDER BY expires_at DESC",
+            (did,)
+        ).fetchall()
+        return [{"key": r[0], "expires_at": r[1]} for r in rows]
+
+
 # -----------------------------------------------------------------------------
 # Discord helpers: token exchange, user, guild member, role operations
 # -----------------------------------------------------------------------------
@@ -482,11 +491,16 @@ def generate_key_route():
 @app.route("/keys", methods=["GET"])
 def keys_list():
     try:
-        rows = list_keys()
+        user = session.get("user")
+        if not user:
+            return jsonify({"ok": False, "message": "Not logged in"}), 401
+        did = str(user.get("id"))
+        rows = list_keys_for_did(did)
         return jsonify({"ok": True, "keys": rows}), 200
     except Exception:
         app.logger.exception("Failed to list keys")
         return jsonify({"ok": False, "message": "server error"}), 500
+
 
 @app.route("/admin/key/<key>", methods=["DELETE"])
 def admin_burn_key(key):
