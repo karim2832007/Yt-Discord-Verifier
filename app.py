@@ -273,35 +273,36 @@ def favicon():
     # Return empty 204 so browsers stop logging 500s
     return "", 204
 
-
 # --- REPLACEMENT: SQLite-only keys with single-use + admin override ---
-
-import secrets, time, sqlite3
-from flask import jsonify, session
+import secrets
+import time
+import sqlite3
+from flask import jsonify, session, request
 
 DB_PATH = "keys.db"
 
-# Ensure table exists
+# Ensure table exists (did may be NULL so keys can be unbound if desired)
 def init_db():
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute("""
             CREATE TABLE IF NOT EXISTS issued_keys (
                 key TEXT PRIMARY KEY,
-                did TEXT NOT NULL,
+                did TEXT,
                 expires_at REAL NOT NULL,
                 used INTEGER NOT NULL DEFAULT 0
             )
         """)
 init_db()
 
-def create_new_key(did: str):
-    """Invalidate old keys for this DID and create a new single-use key with 24h expiry."""
+def create_new_key(did: str | None):
+    """Create a new single-use key with 24h expiry.
+    If did is provided we remove previous keys for that did to keep one active per user.
+    """
     with sqlite3.connect(DB_PATH) as conn:
-        # Remove any previous keys for this DID
-        conn.execute("DELETE FROM issued_keys WHERE did = ?", (did,))
-        # Create fresh key
+        if did:
+            conn.execute("DELETE FROM issued_keys WHERE did = ?", (did,))
         key = secrets.token_urlsafe(24)
-        expires_at = time.time() + 24*60*60
+        expires_at = time.time() + 24 * 60 * 60
         conn.execute(
             "INSERT INTO issued_keys (key, did, expires_at, used) VALUES (?, ?, ?, 0)",
             (key, did, expires_at)
@@ -320,37 +321,42 @@ def get_key_record(key: str):
         return None
 
 def burn_key(key: str):
-    """Delete the key to enforce single-use and keep key.html clean."""
+    """Delete the key to enforce single-use and keep the DB clean."""
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute("DELETE FROM issued_keys WHERE key = ?", (key,))
         conn.commit()
 
+# Generate route: tied to logged-in session user (stores DID but validation is key-first)
 @app.route("/generate_key", methods=["POST"])
 def generate_key_route():
     try:
         user = session.get("user")
         if not user:
             return jsonify({"ok": False, "message": "Not logged in"}), 401
-
-        did = str(user.get("id"))
+        did = str(user.get("id")) if user.get("id") else None
         username = user.get("username", "")
-
         new_key = create_new_key(did)
         return jsonify({
             "ok": True,
             "key": new_key,
             "message": f"Welcome {username}, here’s your new key."
         }), 200
-
     except Exception as e:
         app.logger.exception("Key generation failed")
         return jsonify({"ok": False, "message": f"Server error: {str(e)}"}), 500
 
-@app.route("/validate_key/<did>/<key>")
-def validate_key_route(did, key):
+# Validation routes:
+# - /validate_key/<key>  => key-only validation (preferred)
+# - /validate_key/<did>/<key> => legacy path tolerated
+# Behavior:
+# - If global_override or per-user admin override is active, accept immediately
+# - Otherwise check key record: not found -> 400, expired/used -> 410 (and delete), valid -> 200 and delete (single-use)
+@app.route("/validate_key/<key>", methods=["GET"])
+@app.route("/validate_key/<did>/<key>", methods=["GET"])
+def validate_key_route(key, did=None):
     try:
-        # Admin override: accept anything (requires global_override/admin_overrides defined elsewhere)
-        if global_override or admin_overrides.get(did):
+        # Admin override: accept anything (global_override and admin_overrides expected in app globals)
+        if globals().get("global_override") or (did and globals().get("admin_overrides", {}).get(did)):
             return jsonify({
                 "ok": True,
                 "valid": True,
@@ -361,27 +367,31 @@ def validate_key_route(did, key):
         if not record:
             return jsonify({"ok": False, "valid": False, "message": "Key not found"}), 400
 
-        # ID binding
-        if record["did"] != did:
-            return jsonify({"ok": False, "valid": False, "message": "Key does not belong to this ID"}), 403
-
-        # Expired → delete
-        if time.time() > record["expires_at"]:
+        # Expired -> delete and return 410
+        if time.time() > float(record["expires_at"]):
             burn_key(key)
             return jsonify({"ok": False, "valid": False, "message": "Key expired"}), 410
 
-        # Already used → delete
-        if record["used"]:
+        # Already used -> delete and return 410 (defensive, though single-use deletes on success)
+        if int(record["used"]):
             burn_key(key)
             return jsonify({"ok": False, "valid": False, "message": "Key already used"}), 410
 
-        # First valid use → burn immediately (single-use)
+        # If DID binding is required by policy, you could check here.
+        # Current behavior: keys are validated by key only. If you want to enforce binding,
+        # uncomment the block below.
+        #
+        # if did and record["did"] and str(record["did"]) != str(did):
+        #     return jsonify({"ok": False, "valid": False, "message": "Key does not belong to this ID"}), 403
+
+        # Valid: enforce single-use by removing the key immediately
         burn_key(key)
         return jsonify({"ok": True, "valid": True, "message": "Key validated successfully"}), 200
 
     except Exception as e:
         app.logger.exception("Validation failed")
         return jsonify({"ok": False, "valid": False, "message": f"Server error: {str(e)}"}), 500
+
 
 # -----------------------------------------------------------------------------
 # Mobile-friendly HTML snippets
@@ -547,7 +557,7 @@ def logout():
 @app.route("/status/<did>")
 def status(did):
     # Global override
-    if global_override:
+    if globals().get("global_override"):
         return jsonify({
             "ok": True,
             "member": True,
@@ -556,8 +566,8 @@ def status(did):
             "message": "GLOBAL OVERRIDE ACTIVE"
         }), 200
 
-    # Admin override
-    if admin_overrides.get(did):
+    # Admin override for this DID
+    if globals().get("admin_overrides", {}).get(did):
         return jsonify({
             "ok": True,
             "member": True,
@@ -573,7 +583,7 @@ def status(did):
         return jsonify({
             "ok": True,
             "member": True,
-            "role_granted": True,  # ✅ always true now
+            "role_granted": True,
             "username": username,
             "message": f"Welcome {username}! Don’t forget to get your key from the website."
         }), 200
@@ -590,7 +600,6 @@ def status(did):
 def health():
     return jsonify({"ok": True, "ts": now_ts()}), 200
 
-# app.py — Part 6/6
 # -----------------------------------------------------------------------------
 # Overrides (owner only)
 # -----------------------------------------------------------------------------
@@ -599,32 +608,40 @@ def override_all():
     global global_override
     if not require_owner():
         return jsonify({"ok": False, "message": "Forbidden"}), 403
+
     if request.method == "GET":
-        return jsonify({"ok": True, "global_override": global_override}), 200
+        return jsonify({"ok": True, "global_override": bool(globals().get("global_override", False))}), 200
+
     if request.method == "POST":
         global_override = True
         save_state()
         return jsonify({"ok": True, "global_override": True}), 200
+
     if request.method == "DELETE":
         global_override = False
         save_state()
         return jsonify({"ok": True, "global_override": False}), 200
+
     return jsonify({"ok": False, "message": "Method not allowed"}), 405
 
 @app.route("/override/<did>", methods=["GET", "POST", "DELETE"])
 def override_user(did):
     if not require_owner():
         return jsonify({"ok": False, "message": "Forbidden"}), 403
+
     if request.method == "GET":
-        return jsonify({"ok": True, "user_override": bool(admin_overrides.get(did)), "discord_id": did}), 200
+        return jsonify({"ok": True, "user_override": bool(globals().get("admin_overrides", {}).get(did)), "discord_id": did}), 200
+
     if request.method == "POST":
         admin_overrides[did] = {"username": "", "discriminator": ""}
         save_state()
         return jsonify({"ok": True, "user_override": True, "discord_id": did}), 200
+
     if request.method == "DELETE":
         admin_overrides.pop(did, None)
         save_state()
         return jsonify({"ok": True, "user_override": False, "discord_id": did}), 200
+
     return jsonify({"ok": False, "message": "Method not allowed"}), 405
 
 # -----------------------------------------------------------------------------
@@ -641,22 +658,38 @@ def remove_role_now(did):
 def remove_role_all():
     if not require_owner():
         return jsonify({"ok": False, "message": "Forbidden"}), 403
+
     if not DISCORD_GUILD_ID or not DISCORD_BOT_TOKEN:
         return jsonify({"ok": False, "message": "Missing guild or bot token"}), 400
+
     url = f"https://discord.com/api/guilds/{DISCORD_GUILD_ID}/members?limit=1000"
     headers = {"Authorization": f"Bot {DISCORD_BOT_TOKEN}", "User-Agent": UA}
-    resp = requests.get(url, headers=headers, timeout=15)
+    try:
+        resp = requests.get(url, headers=headers, timeout=15)
+    except requests.RequestException as e:
+        app.logger.exception("Failed to fetch guild members")
+        return jsonify({"ok": False, "message": "Failed to fetch members", "error": str(e)}), 500
+
     if resp.status_code != 200:
         return jsonify({"ok": False, "message": "Failed to fetch members", "status": resp.status_code}), 500
+
     members = resp.json()
     removed, failed = [], []
     for m in members:
-        did = str(m["user"]["id"])
-        r = requests.delete(
-            f"https://discord.com/api/guilds/{DISCORD_GUILD_ID}/members/{did}/roles/{DISCORD_ROLE_ID}",
-            headers=headers, timeout=15
-        )
-        (removed if r.status_code in (200, 204) else failed).append(did)
+        try:
+            did = str(m["user"]["id"])
+            r = requests.delete(
+                f"https://discord.com/api/guilds/{DISCORD_GUILD_ID}/members/{did}/roles/{DISCORD_ROLE_ID}",
+                headers=headers, timeout=15
+            )
+            if r.status_code in (200, 204):
+                removed.append(did)
+            else:
+                failed.append(did)
+        except Exception:
+            app.logger.exception("Error removing role for member")
+            failed.append(did)
+
     return jsonify({
         "ok": True,
         "removed_count": len(removed),
