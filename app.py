@@ -656,6 +656,23 @@ def purge_keys():
         app.logger.exception("purge_keys failed")
         return jsonify({"ok": False, "message": "server error"}), 500
 
+@app.route("/debug/env")
+def debug_env():
+    return {
+        "base": LOOTLABS_API_BASE,
+        "key_loaded": bool(LOOTLABS_API_KEY)  # don’t print the key itself
+    }
+
+@app.route("/lootlabs/test")
+def lootlabs_test():
+    url = f"{LOOTLABS_API_BASE}/content_locker"
+    headers = {"Authorization": f"Bearer {LOOTLABS_API_KEY}"}
+    try:
+        r = requests.get(url, headers=headers, timeout=10)
+        return {"status": r.status_code, "body": r.text}
+    except Exception as e:
+        return {"error": str(e)}, 500
+
 # -----------------------------------------------------------------------------
 # Run
 # -----------------------------------------------------------------------------
