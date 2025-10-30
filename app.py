@@ -462,7 +462,11 @@ def id_gate_page(did: str, index_link: str):
     # Instead of showing the Copy ID page, just redirect back to your site
     return redirect(f"{index_link}?discord_id={did}", code=302)
 
-# app.py — Part 5/6
+# -----------------------
+# Discord OAuth login + callback (robust, rate-limit aware)
+# -----------------------
+from flask import render_template, make_response
+
 @app.route("/login/discord")
 def login_discord():
     state = make_state()
@@ -476,6 +480,7 @@ def login_discord():
     )
     return redirect(auth_url)
 
+
 def _discord_callback():
     state = request.args.get("state", "")
     code = request.args.get("code", "")
@@ -485,23 +490,31 @@ def _discord_callback():
         return login_error_page("Missing OAuth code", "code missing", "", IONOS_INDEX)
 
     redirect_uri = DISCORD_REDIRECT or request.base_url
+
+    # Exchange token with Discord (your helper)
     token_resp = discord_exchange_token(code, redirect_uri)
 
-    if isinstance(token_resp, dict) and token_resp.get("error") == "rate_limited":
-        retry_after = token_resp.get("retry_after", None)
-        body_preview = (token_resp.get("body") or "")[:800]
-        retry_link = request.base_url + "?" + request.query_string.decode()
-        return rate_limit_page(retry_after, body_preview, retry_link, IONOS_INDEX)
+    # Token helper returns dict on error or mapping on success
+    if isinstance(token_resp, dict):
+        # Rate-limited case (your helper should set this shape)
+        if token_resp.get("error") == "rate_limited":
+            retry_after = token_resp.get("retry_after", None)
+            body_preview = (token_resp.get("body") or "")[:800]
+            retry_link = request.base_url + "?" + request.query_string.decode()
+            return rate_limit_page(retry_after, body_preview, retry_link, IONOS_INDEX)
 
-    if isinstance(token_resp, dict) and token_resp.get("error"):
-        brief = json.dumps({k: token_resp.get(k) for k in ("error", "status") if k in token_resp})
-        body_preview = (token_resp.get("body") or "")[:800]
-        return login_error_page("Login failed", brief, body_preview, IONOS_INDEX)
+        # Generic OAuth/token errors
+        if token_resp.get("error"):
+            brief = json.dumps({k: token_resp.get(k) for k in ("error", "status") if k in token_resp})
+            body_preview = (token_resp.get("body") or "")[:800]
+            return login_error_page("Login failed", brief, body_preview, IONOS_INDEX)
 
-    access_token = token_resp.get("access_token")
+    # token_resp should be a mapping with access_token on success
+    access_token = (token_resp or {}).get("access_token")
     if not access_token:
         return login_error_page("Login failed", "no access_token", json.dumps(token_resp)[:800], IONOS_INDEX)
 
+    # Fetch user info from Discord (your helper)
     user_info = discord_get_user(access_token)
     if isinstance(user_info, dict) and user_info.get("error") == "rate_limited":
         retry_after = user_info.get("retry_after", None)
@@ -513,12 +526,14 @@ def _discord_callback():
     if not did:
         return login_error_page("Discord user lookup failed", json.dumps(user_info)[:200], (user_info.get("body") or "")[:800], IONOS_INDEX)
 
+    # Try to add role if override active or admin_override for this DID
     try:
-        if global_override or bool(admin_overrides.get(did, False)):
+        if globals().get("global_override") or bool(globals().get("admin_overrides", {}).get(did, False)):
             discord_add_role(did)
     except Exception:
-        logging.exception("Role assignment failed")
+        app.logger.exception("Role assignment failed")
 
+    # Persist session safely
     session.permanent = True
     session["user"] = {
         "id": did,
@@ -526,18 +541,29 @@ def _discord_callback():
         "discriminator": user_info.get("discriminator", ""),
         "ts": now_ts()
     }
-    login_history.append(session["user"])
+    # ensure Flask writes the session cookie
+    session.modified = True
 
-    # ✅ Instead of showing the Copy ID page, redirect straight back to your site
+    # record login history
+    try:
+        login_history.append(session["user"])
+    except Exception:
+        app.logger.exception("Failed to append login history")
+
+    # Redirect back to the main site; passing discord_id for convenience
     return redirect(f"{IONOS_INDEX}?discord_id={did}", code=302)
-    
+
+
 @app.route("/login/discord/callback")
 def discord_callback_login():
     return _discord_callback()
 
+
+# legacy callback route preserved
 @app.route("/discord/callback")
 def discord_callback_plain():
     return _discord_callback()
+
 
 # -----------------------------------------------------------------------------
 # Session / Portal / Logout / Status / Health
