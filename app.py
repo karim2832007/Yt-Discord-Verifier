@@ -22,6 +22,8 @@ load_dotenv()
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", secrets.token_hex(32))
 app.permanent_session_lifetime = timedelta(days=1)
+LOOTLABS_API_BASE = os.environ.get("LOOTLABS_API_BASE", "https://creators.lootlabs.gg/api/public")
+LOOTLABS_API_KEY = os.environ.get("LOOTLABS_API_KEY")
 
 # Session cookie settings to allow cross-site usage when needed (change as needed)
 app.config.update(
