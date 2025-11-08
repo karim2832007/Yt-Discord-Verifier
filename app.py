@@ -473,6 +473,10 @@ def discord_callback_login():
 def discord_callback_plain():
     return _discord_callback()
 
+from flask import Flask, request, jsonify, redirect
+from urllib.parse import unquote_plus
+import time
+
 # -------------------------------------------------------------------
 # Generate a new key (allow GET for LootLabs redirect + POST for UI)
 # -------------------------------------------------------------------
@@ -489,10 +493,10 @@ def generate_key_route():
         # Create a new key valid for 24h
         new_key = create_new_key(did)
 
-        # If coming from LootLabs redirect, send user to keys.html
+        # If coming from LootLabs redirect, send user to external keys.html
         ref = request.referrer or ""
         if "loot-link.com" in ref:
-            return redirect(url_for("serve_keys_page"))
+            return redirect("https://gaming-mods.com/keys.html")
 
         # Otherwise return JSON (for frontend button/API use)
         return jsonify({
@@ -539,13 +543,16 @@ def keys_list():
 # -------------------------------------------------------------------
 # Burn a key (admin only)
 # -------------------------------------------------------------------
-@app.route("/admin/key/<key>", methods=["DELETE"])
+@app.route("/admin/key/<path:key>", methods=["DELETE"])
 def admin_burn_key(key):
     try:
         if not require_owner():
             return jsonify({"ok": False, "message": "Forbidden"}), 403
 
+        # Normalize key for safety
+        key = unquote_plus(key).strip()
         burn_key(key)
+
         return jsonify({
             "ok": True,
             "deleted": key,
@@ -558,15 +565,8 @@ def admin_burn_key(key):
 
 
 # -------------------------------------------------------------------
-# Serve keys.html page
+# Validate a key (fix Android encoding issues)
 # -------------------------------------------------------------------
-@app.route("/keys.html")
-def serve_keys_page():
-    return app.send_static_file("keys.html")
-
-
-from urllib.parse import unquote_plus
-
 @app.route("/validate_key/<path:key>", methods=["GET"])
 @app.route("/validate_key/<did>/<path:key>", methods=["GET"])
 def validate_key_route(key, did=None):
@@ -617,7 +617,9 @@ def validate_key_route(key, did=None):
         }), 500
 
 
+# -------------------------------------------------------------------
 # Admin logins listing
+# -------------------------------------------------------------------
 @app.route("/admin/logins", methods=["GET"])
 def admin_logins():
     try:
@@ -628,15 +630,17 @@ def admin_logins():
         app.logger.exception("Failed to fetch admin logins")
         return jsonify({"ok": False, "message": "server error"}), 500
 
-# -----------------------------------------------------------------------------
+
+# -------------------------------------------------------------------
 # Overrides (owner only)
-# -----------------------------------------------------------------------------
+# -------------------------------------------------------------------
 @app.route("/override/all", methods=["GET", "POST", "DELETE"])
 def override_all():
     try:
         global global_override
         if not require_owner():
             return jsonify({"ok": False, "message": "Forbidden"}), 403
+
         if request.method == "GET":
             return jsonify({"ok": True, "global_override": bool(global_override)}), 200
         if request.method == "POST":
@@ -645,10 +649,13 @@ def override_all():
         if request.method == "DELETE":
             set_global_override(False)
             return jsonify({"ok": True, "global_override": False}), 200
+
         return jsonify({"ok": False, "message": "Method not allowed"}), 405
+
     except Exception:
         app.logger.exception("override_all failed")
         return jsonify({"ok": False, "message": "server error"}), 500
+
 
 @app.route("/override/<did>", methods=["GET", "POST", "DELETE"])
 def override_user(did):
