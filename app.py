@@ -473,59 +473,114 @@ def discord_callback_login():
 def discord_callback_plain():
     return _discord_callback()
 
-# -----------------------------------------------------------------------------
-# Keys API and admin routes
-# -----------------------------------------------------------------------------
-@app.route("/generate_key", methods=["POST"])
+# -------------------------------------------------------------------
+# Generate a new key (allow GET for LootLabs redirect + POST for UI)
+# -------------------------------------------------------------------
+@app.route("/generate_key", methods=["GET", "POST"])
 def generate_key_route():
     try:
         user = session.get("user")
         if not user:
             return jsonify({"ok": False, "message": "Not logged in"}), 401
+
         did = str(user.get("id")) if user.get("id") else None
         username = user.get("username", "")
+
+        # Create a new key valid for 24h
         new_key = create_new_key(did)
-        return jsonify({"ok": True, "key": new_key, "message": f"Welcome {username}, here’s your new key."}), 200
+
+        # If coming from LootLabs redirect, send user to keys.html
+        ref = request.referrer or ""
+        if "loot-link.com" in ref:
+            return redirect(url_for("serve_keys_page"))
+
+        # Otherwise return JSON (for frontend button/API use)
+        return jsonify({
+            "ok": True,
+            "key": new_key,
+            "expires_at": time.time() + 24*60*60,
+            "message": f"Welcome {username}, here’s your new key."
+        }), 200
+
     except Exception:
         app.logger.exception("Key generation failed")
         return jsonify({"ok": False, "message": "server error"}), 500
 
+
+# -------------------------------------------------------------------
+# List all keys for the logged-in user
+# -------------------------------------------------------------------
 @app.route("/keys", methods=["GET"])
 def keys_list():
     try:
         user = session.get("user")
         if not user:
             return jsonify({"ok": False, "message": "Not logged in"}), 401
+
         did = str(user.get("id"))
         rows = list_keys_for_did(did)
-        return jsonify({"ok": True, "keys": rows}), 200
+
+        # Normalize rows to include expiry timestamps
+        formatted = []
+        for r in rows:
+            formatted.append({
+                "key": r[0] if isinstance(r, (list, tuple)) else r.get("key"),
+                "expires_at": r[1] if isinstance(r, (list, tuple)) else r.get("expires_at"),
+                "did": did
+            })
+
+        return jsonify({"ok": True, "keys": formatted}), 200
+
     except Exception:
         app.logger.exception("Failed to list keys")
         return jsonify({"ok": False, "message": "server error"}), 500
 
 
+# -------------------------------------------------------------------
+# Burn a key (admin only)
+# -------------------------------------------------------------------
 @app.route("/admin/key/<key>", methods=["DELETE"])
 def admin_burn_key(key):
     try:
         if not require_owner():
             return jsonify({"ok": False, "message": "Forbidden"}), 403
+
         burn_key(key)
-        return jsonify({"ok": True, "deleted": key}), 200
+        return jsonify({
+            "ok": True,
+            "deleted": key,
+            "message": f"Key {key} has been burned."
+        }), 200
+
     except Exception:
         app.logger.exception("Failed to burn key")
         return jsonify({"ok": False, "message": "server error"}), 500
 
-@app.route("/validate_key/<key>", methods=["GET"])
-@app.route("/validate_key/<did>/<key>", methods=["GET"])
+
+# -------------------------------------------------------------------
+# Serve keys.html page
+# -------------------------------------------------------------------
+@app.route("/keys.html")
+def serve_keys_page():
+    return app.send_static_file("keys.html")
+
+
+from urllib.parse import unquote_plus
+
+@app.route("/validate_key/<path:key>", methods=["GET"])
+@app.route("/validate_key/<did>/<path:key>", methods=["GET"])
 def validate_key_route(key, did=None):
     try:
+        # Normalize key from URL (fixes Android encoding issues)
+        key = unquote_plus(key).strip()
+
         # Admin override bypass
         if global_override or (did and admin_overrides.get(did)):
             return jsonify({
                 "ok": True,
                 "valid": True,
                 "message": "ADMIN OVERRIDE ACTIVE",
-                "expires_at": time.time() + 24*60*60  # dummy expiry for UI
+                "expires_at": time.time() + 24*60*60
             }), 200
 
         record = get_key_record(key)
