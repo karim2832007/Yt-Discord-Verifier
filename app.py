@@ -519,26 +519,48 @@ def admin_burn_key(key):
 @app.route("/validate_key/<did>/<key>", methods=["GET"])
 def validate_key_route(key, did=None):
     try:
+        # Admin override bypass
         if global_override or (did and admin_overrides.get(did)):
-            return jsonify({"ok": True, "valid": True, "message": "ADMIN OVERRIDE ACTIVE"}), 200
+            return jsonify({
+                "ok": True,
+                "valid": True,
+                "message": "ADMIN OVERRIDE ACTIVE",
+                "expires_at": time.time() + 24*60*60  # dummy expiry for UI
+            }), 200
 
         record = get_key_record(key)
         if not record:
-            return jsonify({"ok": False, "valid": False, "message": "Key not found"}), 400
+            return jsonify({
+                "ok": False,
+                "valid": False,
+                "message": "Key not found"
+            }), 400
 
+        # Expired key
         if time.time() > float(record["expires_at"]):
             burn_key(key)
-            return jsonify({"ok": False, "valid": False, "message": "Key expired"}), 410
+            return jsonify({
+                "ok": False,
+                "valid": False,
+                "message": "Key expired"
+            }), 410
 
-        if int(record["used"]):
-            burn_key(key)
-            return jsonify({"ok": False, "valid": False, "message": "Key already used"}), 410
+        # Key is valid for 24h, do NOT burn on first use
+        return jsonify({
+            "ok": True,
+            "valid": True,
+            "message": "Key is valid",
+            "expires_at": float(record["expires_at"])
+        }), 200
 
-        burn_key(key)
-        return jsonify({"ok": True, "valid": True, "message": "Key validated successfully"}), 200
     except Exception:
         app.logger.exception("Validation failed")
-        return jsonify({"ok": False, "valid": False, "message": "server error"}), 500
+        return jsonify({
+            "ok": False,
+            "valid": False,
+            "message": "Server error"
+        }), 500
+
 
 # Admin logins listing
 @app.route("/admin/logins", methods=["GET"])
