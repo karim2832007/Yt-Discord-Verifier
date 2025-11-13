@@ -160,6 +160,20 @@ def purge_expired():
         now = time.time()
         conn.execute("DELETE FROM issued_keys WHERE expires_at < ?", (now,))
         conn.commit()
+        
+def create_custom_key(custom_key: str, did: Optional[str], duration_seconds: int) -> str:
+    """Create a custom key with arbitrary string and custom expiry."""
+    with sqlite3.connect(DB_PATH) as conn:
+        # Remove old keys for same user if needed
+        if did:
+            conn.execute("DELETE FROM issued_keys WHERE did = ?", (did,))
+        expires_at = time.time() + duration_seconds
+        conn.execute(
+            "INSERT INTO issued_keys (key, did, expires_at, used) VALUES (?, ?, ?, 0)",
+            (custom_key, did, expires_at)
+        )
+        conn.commit()
+    return custom_key
 
 # -----------------------------------------------------------------------------
 # Helper: owner check (requires session user and environment OWNER_ID)
@@ -563,6 +577,32 @@ def admin_burn_key(key):
         app.logger.exception("Failed to burn key")
         return jsonify({"ok": False, "message": "server error"}), 500
 
+@app.route("/generate_custom_key", methods=["POST"])
+def generate_custom_key_route():
+    try:
+        user = session.get("user")
+        if not user:
+            return jsonify({"ok": False, "message": "Not logged in"}), 401
+
+        data = request.get_json(force=True)
+        custom_key = data.get("key")  # user-defined string
+        duration = int(data.get("duration", 86400))  # default 24h
+
+        if not custom_key or len(custom_key) < 4:
+            return jsonify({"ok": False, "message": "Key must be at least 4 chars"}), 400
+
+        did = str(user.get("id")) if user.get("id") else None
+        new_key = create_custom_key(custom_key, did, duration)
+
+        return jsonify({
+            "ok": True,
+            "key": new_key,
+            "expires_at": time.time() + duration,
+            "message": f"Custom key created for {user.get('username', '')}"
+        }), 200
+    except Exception:
+        app.logger.exception("Custom key generation failed")
+        return jsonify({"ok": False, "message": "server error"}), 500
 
 # -------------------------------------------------------------------
 # Validate a key (fix Android encoding issues)
