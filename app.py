@@ -540,7 +540,7 @@ def generate_key_route():
 # -------------------------------------------------------------------
 @app.route("/keys", methods=["GET"])
 def keys():
-    # preserve original permissions. If it was admin-only, keep same behavior
+    # preserve original permission model (owner/admin)
     if not is_owner_session():
         return jsonify({"ok": False, "message": "admin only"}), 403
     try:
@@ -549,9 +549,15 @@ def keys():
             rows = cur.fetchall()
         keys = [{"key": r[0], "did": r[1], "expires_at": int(r[2]) if r[2] else None, "used": r[3], "note": r[4]} for r in rows]
         return jsonify({"keys": keys}), 200
-    except Exception:
+    except sqlite3.OperationalError as e:
+        # Likely DB missing/table/schema problem
+        current_app.logger.exception("keys list OperationalError")
+        return jsonify({"ok": False, "message": "database error", "detail": str(e)}), 500
+    except Exception as e:
+        # Unexpected error: log full trace and return safe message
         current_app.logger.exception("keys list failed")
-        return jsonify({"ok": False, "message": "server error"}), 500
+        return jsonify({"ok": False, "message": "server error", "detail": str(e)}), 500
+
 @app.route("/revoke_key", methods=["POST"])
 def revoke_key():
     if not is_owner_session():
