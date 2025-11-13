@@ -344,6 +344,16 @@ def portal_me():
     if not user:
         return jsonify({"ok": False, "message": "Not logged in"}), 401
     return jsonify({"ok": True, "user": user}), 200
+    
+@app.route("/me", methods=["GET"])
+def me():
+    user = session.get("user") or {}
+    return jsonify({
+        "username": user.get("username"),
+        "id": user.get("id"),
+        # let the frontend know whether this session is owner/admin
+        "is_admin": bool(is_owner_session())
+    }), 200
 
 @app.route("/logout")
 def logout():
@@ -529,29 +539,37 @@ def generate_key_route():
 # List all keys for the logged-in user
 # -------------------------------------------------------------------
 @app.route("/keys", methods=["GET"])
-def keys_list():
+def keys():
+    # preserve original permissions. If it was admin-only, keep same behavior
+    if not is_owner_session():
+        return jsonify({"ok": False, "message": "admin only"}), 403
     try:
-        user = session.get("user")
-        if not user:
-            return jsonify({"ok": False, "message": "Not logged in"}), 401
-
-        did = str(user.get("id"))
-        rows = list_keys_for_did(did)
-
-        # Normalize rows to include expiry timestamps
-        formatted = []
-        for r in rows:
-            formatted.append({
-                "key": r[0] if isinstance(r, (list, tuple)) else r.get("key"),
-                "expires_at": r[1] if isinstance(r, (list, tuple)) else r.get("expires_at"),
-                "did": did
-            })
-
-        return jsonify({"ok": True, "keys": formatted}), 200
-
+        with _conn() as conn:
+            cur = conn.execute("SELECT key, did, expires_at, used, note FROM issued_keys ORDER BY expires_at DESC LIMIT 2000")
+            rows = cur.fetchall()
+        keys = [{"key": r[0], "did": r[1], "expires_at": int(r[2]) if r[2] else None, "used": r[3], "note": r[4]} for r in rows]
+        return jsonify({"keys": keys}), 200
     except Exception:
-        app.logger.exception("Failed to list keys")
+        current_app.logger.exception("keys list failed")
         return jsonify({"ok": False, "message": "server error"}), 500
+@app.route("/revoke_key", methods=["POST"])
+def revoke_key():
+    if not is_owner_session():
+        return jsonify({"ok": False, "message": "admin only"}), 403
+    data = request.get_json(silent=True) or {}
+    key = data.get("key")
+    if not key:
+        return jsonify({"ok": False, "message": "no key provided"}), 400
+    try:
+        with _conn() as conn:
+            conn.execute("DELETE FROM issued_keys WHERE key = ?", (key,))
+            conn.commit()
+        audit_log(session.get("user", {}).get("id"), "revoke_key", {"key": key})
+        return jsonify({"ok": True}), 200
+    except Exception:
+        current_app.logger.exception("revoke_key failed")
+        return jsonify({"ok": False, "message": "server error"}), 500
+
 
 
 # -------------------------------------------------------------------
@@ -578,83 +596,116 @@ def admin_burn_key(key):
         return jsonify({"ok": False, "message": "server error"}), 500
 
 @app.route("/generate_custom_key", methods=["POST"])
-def generate_custom_key_route():
+def generate_custom_key():
+    # keep your original auth behavior (here we require logged-in user; adjust as needed)
+    user = session.get("user")
+    if not user:
+        return jsonify({"ok": False, "message": "Not logged in"}), 401
+
+    data = request.get_json(silent=True) or {}
+    # frontend sends duration in hours; convert to seconds server-side
+    # but also accept duration already in seconds if 'seconds' field used
+    hours = data.get("duration_hours")
+    duration_seconds = None
+    if hours is not None:
+        try:
+            duration_seconds = int(hours) * 3600
+        except Exception:
+            return jsonify({"ok": False, "message": "invalid duration_hours"}), 400
+    else:
+        # fallback to legacy 'duration' field (seconds)
+        duration_seconds = int(data.get("duration", 86400))
+
+    custom_key = data.get("key")
+    did = data.get("did") or None
+    note = data.get("note") or ""
+
+    if not custom_key or len(str(custom_key)) < 3:
+        return jsonify({"ok": False, "message": "key too short"}), 400
+
+    if did:
+        if not str(did).isdigit() or not (16 <= len(str(did)) <= 21):
+            return jsonify({"ok": False, "message": "invalid discord id"}), 400
+
+    expires_at = int(time.time()) + int(duration_seconds)
+
     try:
-        user = session.get("user")
-        if not user:
-            return jsonify({"ok": False, "message": "Not logged in"}), 401
-
-        data = request.get_json(force=True)
-        custom_key = data.get("key")  # user-defined string
-        duration = int(data.get("duration", 86400))  # default 24h
-
-        if not custom_key or len(custom_key) < 4:
-            return jsonify({"ok": False, "message": "Key must be at least 4 chars"}), 400
-
-        did = str(user.get("id")) if user.get("id") else None
-        new_key = create_custom_key(custom_key, did, duration)
-
-        return jsonify({
-            "ok": True,
-            "key": new_key,
-            "expires_at": time.time() + duration,
-            "message": f"Custom key created for {user.get('username', '')}"
-        }), 200
+        with _conn() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO issued_keys (key, did, expires_at, used, note) VALUES (?, ?, ?, 0, ?)",
+                (custom_key, did, expires_at, note)
+            )
+            conn.commit()
+        # audit the creation (actor id from session)
+        audit_log(user.get("id"), "generate_custom_key", {"key": custom_key, "did": did, "expires_at": expires_at})
+        return jsonify({"ok": True, "key": custom_key, "expires_at": expires_at}), 200
     except Exception:
-        app.logger.exception("Custom key generation failed")
+        current_app.logger.exception("generate_custom_key failed")
         return jsonify({"ok": False, "message": "server error"}), 500
+
 
 # -------------------------------------------------------------------
 # Validate a key (fix Android encoding issues)
 # -------------------------------------------------------------------
 @app.route("/validate_key/<path:key>", methods=["GET"])
-@app.route("/validate_key/<did>/<path:key>", methods=["GET"])
-def validate_key_route(key, did=None):
-    try:
-        # Normalize key from URL (fixes Android encoding issues)
-        key = unquote_plus(key).strip()
+@app.route("/validate_key", methods=["POST"])
+def validate_key():
+    # If your old route was public for games, keep it public: no admin guard here
+    data = request.get_json(silent=True) or {}
+    key = data.get("key")
+    if not key:
+        return jsonify({"ok": False, "message": "no key provided"}), 400
 
-        # Admin override bypass
-        if global_override or (did and admin_overrides.get(did)):
+    now = int(time.time())
+
+    # check global override first
+    try:
+        global_row = None
+        with _conn() as conn:
+            cur = conn.execute("SELECT expires_at FROM overrides WHERE id = 'GLOBAL'")
+            global_row = cur.fetchone()
+        if global_row and global_row[0] and int(global_row[0]) > now:
+            global_expires = int(global_row[0])
+            remaining = max(0, global_expires - now)
             return jsonify({
                 "ok": True,
-                "valid": True,
-                "message": "ADMIN OVERRIDE ACTIVE",
-                "expires_at": time.time() + 24*60*60
+                "reason": "global override active",
+                "expires_at": global_expires,
+                "remaining_seconds": remaining,
+                "legacy_remaining_seconds": min(remaining, LEGACY_LIMIT_SECONDS),
+                "legacy_duration": LEGACY_LIMIT_SECONDS
             }), 200
-
-        record = get_key_record(key)
-        if not record:
-            return jsonify({
-                "ok": False,
-                "valid": False,
-                "message": "Key not found"
-            }), 400
-
-        # Expired key
-        if time.time() > float(record["expires_at"]):
-            burn_key(key)
-            return jsonify({
-                "ok": False,
-                "valid": False,
-                "message": "Key expired"
-            }), 410
-
-        # Key is valid for 24h, do NOT burn on first use
-        return jsonify({
-            "ok": True,
-            "valid": True,
-            "message": "Key is valid",
-            "expires_at": float(record["expires_at"])
-        }), 200
-
     except Exception:
-        app.logger.exception("Validation failed")
+        current_app.logger.exception("validate_key global check error")
+
+    rec = fetch_key_record(key)
+    if not rec:
+        return jsonify({"ok": False, "message": "not found"}), 404
+
+    expires_at = rec.get("expires_at") or 0
+    remaining = max(0, int(expires_at - now)) if expires_at else 0
+
+    if expires_at and expires_at < now:
         return jsonify({
             "ok": False,
-            "valid": False,
-            "message": "Server error"
-        }), 500
+            "message": "expired",
+            "key": rec["key"],
+            "did": rec["did"],
+            "expires_at": expires_at,
+            "remaining_seconds": 0,
+            "legacy_remaining_seconds": 0,
+            "legacy_duration": LEGACY_LIMIT_SECONDS
+        }), 200
+
+    return jsonify({
+        "ok": True,
+        "key": rec["key"],
+        "did": rec["did"],
+        "expires_at": expires_at,
+        "remaining_seconds": remaining,
+        "legacy_remaining_seconds": min(remaining, LEGACY_LIMIT_SECONDS),
+        "legacy_duration": LEGACY_LIMIT_SECONDS
+    }), 200
 
 
 # -------------------------------------------------------------------
@@ -814,6 +865,126 @@ def debug_lootlabs():
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+import os, sqlite3, time, json
+from flask import request, jsonify, session, current_app
+
+DB_PATH = globals().get("DB_PATH", os.environ.get("ADIME_DB_PATH", "data.db"))
+OWNER_ID = os.environ.get("OWNER_ID")
+LEGACY_LIMIT_SECONDS = 86400
+
+def _conn():
+    return sqlite3.connect(DB_PATH, detect_types=sqlite3.PARSE_DECLTYPES)
+
+def is_owner_session():
+    user = session.get("user")
+    if not user:
+        return False
+    if user.get("is_admin"):
+        return True
+    if OWNER_ID and str(user.get("id")) == str(OWNER_ID):
+        return True
+    return False
+
+def audit_log(actor_id, action, meta=None):
+    try:
+        with _conn() as conn:
+            conn.execute(
+                "INSERT INTO admin_audit (ts, actor_id, action, meta) VALUES (?, ?, ?, ?)",
+                (int(time.time()), str(actor_id) if actor_id else None, action, json.dumps(meta) if meta else None)
+            )
+            conn.commit()
+    except Exception:
+        current_app.logger.exception("audit_log failed")
+
+def get_active_global_override(now=None):
+    now = now or int(time.time())
+    try:
+        with _conn() as conn:
+            cur = conn.execute("SELECT expires_at FROM overrides WHERE id = 'GLOBAL'")
+            r = cur.fetchone()
+            if r and r[0] and int(r[0]) > now:
+                return int(r[0])
+    except Exception:
+        current_app.logger.exception("get_active_global_override")
+    return None
+
+def fetch_key_record(key):
+    try:
+        with _conn() as conn:
+            cur = conn.execute("SELECT key, did, expires_at, used, note FROM issued_keys WHERE key = ?", (key,))
+            r = cur.fetchone()
+        if not r:
+            return None
+        return {"key": r[0], "did": r[1], "expires_at": int(r[2]) if r[2] else None, "used": r[3], "note": r[4]}
+    except Exception:
+        current_app.logger.exception("fetch_key_record")
+        return None
+with _conn() as conn:
+    conn.execute("""CREATE TABLE IF NOT EXISTS overrides (
+                      id TEXT PRIMARY KEY,
+                      expires_at INTEGER,
+                      created_at INTEGER
+                    )""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS admin_audit (
+                      id INTEGER PRIMARY KEY AUTOINCREMENT,
+                      ts INTEGER,
+                      actor_id TEXT,
+                      action TEXT,
+                      meta TEXT
+                    )""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS issued_keys (
+                      key TEXT PRIMARY KEY,
+                      did TEXT,
+                      expires_at INTEGER,
+                      used INTEGER DEFAULT 0,
+                      note TEXT
+                    )""")
+    conn.commit()
+@app.route("/create_override", methods=["POST"])
+def create_override():
+    # keep admin-only guard if your original route required admin; adapt to your auth
+    if not is_owner_session():
+        return jsonify({"ok": False, "message": "admin only"}), 403
+    data = request.get_json(silent=True) or {}
+    id_ = data.get("id")
+    # frontend now sends hours for overrides too; convert to seconds
+    hours = data.get("duration_hours")
+    if hours is not None:
+        try:
+            duration_seconds = int(hours) * 3600
+        except Exception:
+            return jsonify({"ok": False, "message": "invalid duration_hours"}), 400
+    else:
+        duration_seconds = int(data.get("duration", 86400))
+    if not id_:
+        return jsonify({"ok": False, "message": "no id provided"}), 400
+    if id_ != "GLOBAL":
+        if not str(id_).isdigit() or not (16 <= len(str(id_)) <= 21):
+            return jsonify({"ok": False, "message": "invalid discord id"}), 400
+    expires_at = int(time.time()) + duration_seconds
+    try:
+        with _conn() as conn:
+            conn.execute("INSERT OR REPLACE INTO overrides (id, expires_at, created_at) VALUES (?, ?, ?)",
+                         (id_, expires_at, int(time.time())))
+            conn.commit()
+        audit_log(session.get("user", {}).get("id"), "create_override", {"id": id_, "expires_at": expires_at})
+        return jsonify({"ok": True, "id": id_, "expires_at": expires_at}), 200
+    except Exception:
+        current_app.logger.exception("create_override failed")
+        return jsonify({"ok": False, "message": "server error"}), 500
+@app.route("/overrides", methods=["GET"])
+def overrides():
+    if not is_owner_session():
+        return jsonify({"ok": False, "message": "admin only"}), 403
+    try:
+        with _conn() as conn:
+            cur = conn.execute("SELECT id, expires_at, created_at FROM overrides ORDER BY created_at DESC LIMIT 500")
+            rows = cur.fetchall()
+        overrides = [{"id": r[0], "expires_at": int(r[1]) if r[1] else None, "created_at": int(r[2]) if r[2] else None} for r in rows]
+        return jsonify({"overrides": overrides}), 200
+    except Exception:
+        current_app.logger.exception("overrides list failed")
+        return jsonify({"ok": False, "message": "server error"}), 500
 
 
 # -----------------------------------------------------------------------------
