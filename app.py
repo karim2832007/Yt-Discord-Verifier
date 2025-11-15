@@ -160,7 +160,7 @@ def create_new_key(did: Optional[str]) -> str:
     with _conn() as conn:
         if did:
             conn.execute("DELETE FROM issued_keys WHERE did = ?", (did,))
-        key = secrets.token_urlsafe(24)
+        key = secrets.token_urlsafe(10)
         expires_at = time.time() + 24 * 60 * 60
         conn.execute(
             "INSERT INTO issued_keys (key, did, expires_at, used) VALUES (?, ?, ?, 0)",
