@@ -643,38 +643,50 @@ def validate_key_route(key=None, did=None):
         if request.method == "POST":
             data = request.get_json(silent=True) or {}
             key = data.get("key")
+
         if not key:
-            return jsonify({"ok": False, "message": "no key provided"}), 400
+            return jsonify({"ok": False, "valid": False, "message": "no key provided"}), 400
 
         key = unquote_plus(key).strip()
+        now = time.time()
 
         # Global or admin override
         if global_override or (did and admin_overrides.get(did)):
+            expires_at = int(now) + LEGACY_LIMIT_SECONDS
             return jsonify({
                 "ok": True,
                 "valid": True,
                 "message": "ADMIN OVERRIDE ACTIVE",
-                "expires_at": int(time.time()) + LEGACY_LIMIT_SECONDS
+                "expires_at": float(expires_at),
+                "expires_in": int(expires_at - now)
             }), 200
 
         record = get_key_record(key)
         if not record:
             return jsonify({"ok": False, "valid": False, "message": "Key not found"}), 400
 
-        if time.time() > float(record["expires_at"]):
-            burn_key(key)
+        try:
+            rec_expires_at = float(record["expires_at"])
+        except (KeyError, ValueError, TypeError):
+            return jsonify({"ok": False, "valid": False, "message": "Malformed expiry"}), 500
+
+        if now > rec_expires_at:
+            burn_key(key)  # keep your existing behavior on expiry
             return jsonify({"ok": False, "valid": False, "message": "Key expired"}), 410
 
+        # Key is valid — return precise expiry info
         return jsonify({
             "ok": True,
             "valid": True,
             "message": "Key is valid",
-            "expires_at": float(record["expires_at"])
+            "expires_at": float(rec_expires_at),
+            "expires_in": int(rec_expires_at - now)
         }), 200
 
     except Exception:
         app.logger.exception("Validation failed")
         return jsonify({"ok": False, "valid": False, "message": "Server error"}), 500
+
 
 # -----------------------------------------------------------------------------
 # Admin logins listing
