@@ -703,9 +703,11 @@ def api_keys():
 def api_generate_custom_key():
     return generate_key_route()  # reuse your generate_key function
 
-@app.route("/admin/api/generate_custom_key", methods=["POST"])
+@app.route("/admin/api/generate_custom_key", methods=["POST"], endpoint="admin_generate_custom_key")
 def api_generate_custom_key():
     return generate_custom_key_route()
+
+
 
     
 @app.route("/admin/api/me", methods=["GET"])
