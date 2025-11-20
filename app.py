@@ -621,34 +621,6 @@ def add_cors(resp):
     resp.headers['Vary'] = 'Origin'
     return resp
 
-# ---- Start Step ----
-@app.route('/start_step', methods=['POST'])
-def start_step():
-    data = request.get_json() or {}
-    step = int(data.get('step', 0))
-    if step not in (1, 2, 3):
-        return jsonify({'ok': False, 'message': 'invalid step'}), 400
-
-    sid = session.get('_sid')
-    if not sid:
-        sid = secrets.token_urlsafe(16)
-        session['_sid'] = sid
-
-    token = secrets.token_urlsafe(32)
-    now = time.time()
-    clicks_store[token] = {
-        'token': token,
-        'session_id': sid,
-        'step': step,
-        'created_at': now,
-        'expires_at': now + 3600,
-        'status': 'pending',
-        'click_id': None
-    }
-
-    verifier_dest = f'https://verifier.gaming-mods.com/verify_click?token={token}'
-    return jsonify({'ok': True, 'verifier_dest': verifier_dest, 'token': token}), 200
-
 # ---- Checkpoint ----
 @app.route('/checkpoint', methods=['GET', 'OPTIONS'])
 def checkpoint():
