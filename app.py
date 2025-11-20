@@ -531,20 +531,45 @@ def generate_key_route():
         user = session.get("user")
         if not user:
             return jsonify({"ok": False, "message": "Not logged in"}), 401
+
+        # Require loot progress completion
         if int(session.get("loot_progress", 0)) != 3:
             return jsonify({"ok": False, "message": "You must complete all steps"}), 403
+
         did = str(user.get("id")) if user.get("id") else None
         username = user.get("username", "")
-        new_key = create_new_key(did)
+
+        # Allow custom duration (hours) from POST body, default 24h
+        hours = 24
+        if request.method == "POST":
+            data = request.get_json(silent=True) or {}
+            hours = int(data.get("hours", 24))
+
+        expires_at = time.time() + (hours * 3600)
+        new_key = create_new_key(did, expires_at=expires_at)
+
+        # Reset loot progress
         session["loot_progress"] = 0
         session["loot_progress_expires"] = None
+
+        # Handle special referrer redirect
         ref = request.referrer or ""
         if "loot-link.com" in ref or "lootdest.org" in ref:
             return redirect(f"{FRONTEND_ORIGIN}/keys.html?highlight={new_key}")
-        return jsonify({"ok": True, "key": new_key, "expires_at": time.time() + 24*60*60, "message": f"Welcome {username}, here’s your new key."}), 200
-    except Exception:
-        logger.exception("Key generation failed")
+
+        # Normal JSON response
+        return jsonify({
+            "ok": True,
+            "key": new_key,
+            "expires_at": expires_at,
+            "expires_in": int(expires_at - time.time()),
+            "message": f"Welcome {username}, here’s your new key."
+        }), 200
+
+    except Exception as e:
+        logger.exception(f"Key generation failed for user={session.get('user')}")
         return jsonify({"ok": False, "message": "server error"}), 500
+
 
 @app.route("/keys", methods=["GET"])
 def keys_list():
@@ -553,12 +578,25 @@ def keys_list():
         if not user:
             return jsonify({"ok": False, "message": "Not logged in"}), 401
         did = str(user.get("id"))
-        rows = list_keys_for_did(did)
-        formatted = [{"key": r["key"], "expires_at": r["expires_at"], "did": did} for r in rows]
+        rows = list_keys_for_did(did)  # implement this helper
+        formatted = [
+            {"key": r[0], "expires_at": r[1], "did": did}
+            for r in rows
+        ]
         return jsonify({"ok": True, "keys": formatted}), 200
     except Exception:
         logger.exception("Failed to list keys")
         return jsonify({"ok": False, "message": "server error"}), 500
+
+@app.route("/revoke_expired", methods=["POST"])
+def revoke_expired():
+    try:
+        revoked = revoke_expired_keys()  # implement this helper
+        return jsonify({"ok": True, "revoked": revoked}), 200
+    except Exception:
+        logger.exception("Failed to revoke expired keys")
+        return jsonify({"ok": False, "message": "server error"}), 500
+
 
 @app.route("/generate_custom_key", methods=["POST"])
 def generate_custom_key_route():
@@ -626,7 +664,7 @@ def validate_key_route(key=None, did=None):
         # Parse expiry safely
         try:
             rec_expires_at = float(record.get("expires_at", 0))
-        except (ValueError, TypeError):
+        except (ValueError, TypeError, KeyError):
             return jsonify({
                 "ok": False,
                 "valid": False,
@@ -652,12 +690,13 @@ def validate_key_route(key=None, did=None):
         }), 200
 
     except Exception:
-        logger.exception("Validation failed")
+        logger.exception(f"Validation failed for key={key}, did={did}")
         return jsonify({
             "ok": False,
             "valid": False,
             "message": "Server error"
         }), 500
+
 
 # ---------- Admin endpoints ----------
 @app.route("/admin/key/<path:key>", methods=["DELETE"])
@@ -700,23 +739,82 @@ def override_all():
         logger.exception("override_all failed")
         return jsonify({"ok": False, "message": "server error"}), 500
 
+@app.route("/override/global", methods=["GET", "POST", "DELETE"])
+def override_global():
+    try:
+        user = session.get("user")
+        if not (user and (str(user.get("id")) == str(OWNER_ID) if OWNER_ID else False)):
+            return jsonify({"ok": False, "message": "Forbidden"}), 403
+
+        if request.method == "GET":
+            return jsonify({
+                "ok": True,
+                "global_override": bool(global_override)
+            }), 200
+
+        if request.method == "POST":
+            expires_at = time.time() + (24 * 3600)  # default 24h
+            set_global_override(True, expires_at=expires_at)
+            return jsonify({
+                "ok": True,
+                "global_override": True,
+                "expires_at": expires_at,
+                "expires_in": int(expires_at - time.time())
+            }), 200
+
+        if request.method == "DELETE":
+            set_global_override(False)
+            return jsonify({
+                "ok": True,
+                "global_override": False
+            }), 200
+
+        return jsonify({"ok": False, "message": "Method not allowed"}), 405
+
+    except Exception:
+        logger.exception("override_global failed")
+        return jsonify({"ok": False, "message": "server error"}), 500
+
+
 @app.route("/override/<did>", methods=["GET", "POST", "DELETE"])
 def override_user(did):
     try:
-        if not (session.get("user") and (str(session.get("user").get("id")) == str(OWNER_ID) if OWNER_ID else False)):
+        user = session.get("user")
+        if not (user and (str(user.get("id")) == str(OWNER_ID) if OWNER_ID else False)):
             return jsonify({"ok": False, "message": "Forbidden"}), 403
+
         if request.method == "GET":
-            return jsonify({"ok": True, "user_override": bool(admin_overrides.get(did)), "discord_id": did}), 200
+            return jsonify({
+                "ok": True,
+                "user_override": bool(admin_overrides.get(did)),
+                "discord_id": did
+            }), 200
+
         if request.method == "POST":
-            set_user_override(did, {"username": "", "discriminator": ""})
-            return jsonify({"ok": True, "user_override": True, "discord_id": did}), 200
+            expires_at = time.time() + (24 * 3600)  # default 24h
+            set_user_override(did, {"username": "", "discriminator": "", "expires_at": expires_at})
+            return jsonify({
+                "ok": True,
+                "user_override": True,
+                "discord_id": did,
+                "expires_at": expires_at,
+                "expires_in": int(expires_at - time.time())
+            }), 200
+
         if request.method == "DELETE":
             set_user_override(did, None)
-            return jsonify({"ok": True, "user_override": False, "discord_id": did}), 200
+            return jsonify({
+                "ok": True,
+                "user_override": False,
+                "discord_id": did
+            }), 200
+
         return jsonify({"ok": False, "message": "Method not allowed"}), 405
+
     except Exception:
-        logger.exception("override_user failed")
+        logger.exception(f"override_user failed for did={did}")
         return jsonify({"ok": False, "message": "server error"}), 500
+
 
 @app.route("/remove_role_now/<did>", methods=["POST"])
 def remove_role_now(did):
