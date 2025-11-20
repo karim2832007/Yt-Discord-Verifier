@@ -168,16 +168,25 @@ def init_db():
 init_db()
 
 # ---------- Key helpers ----------
-def create_new_key(did: Optional[str]) -> str:
+def create_new_key(did: Optional[str], duration_seconds: int = 86400) -> str:
+    """
+    Create a new random key for a Discord user ID (did).
+    - duration_seconds: how long the key should be valid (default 24h).
+    - returns the generated key string.
+    """
     with _conn() as conn:
         if did:
+            # Ensure only one active key per user
             conn.execute("DELETE FROM issued_keys WHERE did = ?", (did,))
         key = secrets.token_urlsafe(10)
-        expires_at = time.time() + 24 * 60 * 60
-        conn.execute("INSERT INTO issued_keys (key, did, expires_at, used) VALUES (?, ?, ?, 0)",
-                     (key, did, expires_at))
+        expires_at = time.time() + duration_seconds
+        conn.execute(
+            "INSERT INTO issued_keys (key, did, expires_at, used) VALUES (?, ?, ?, 0)",
+            (key, did, expires_at)
+        )
         conn.commit()
         return key
+
 
 def create_custom_key(custom_key: str, did: Optional[str], duration_seconds: int) -> str:
     with _conn() as conn:
@@ -553,33 +562,28 @@ def generate_key_route():
         did = str(user.get("id")) if user.get("id") else None
         username = user.get("username", "")
 
-        # Admin override: OWNER_ID can bypass loot_progress
+        # Admin override
         is_admin = OWNER_ID and str(user.get("id")) == str(OWNER_ID)
 
-        # Require loot progress completion unless admin
         if not is_admin and int(session.get("loot_progress", 0)) != 3:
             return jsonify({"ok": False, "message": "You must complete all steps"}), 403
 
-        # Allow custom duration (hours) from POST body, default 24h
+        # Duration handling
         hours = 24
         if request.method == "POST":
             data = request.get_json(silent=True) or {}
             hours = int(data.get("hours", 24))
 
-        expires_at = time.time() + (hours * 3600)
-        new_key = create_new_key(did, expires_at=expires_at)
+        duration = hours * 3600
+        expires_at = time.time() + duration
 
-        # Reset loot progress (only for normal users)
+        # FIX: call create_new_key with correct signature
+        new_key = create_new_key(did, duration)  # or create_new_key(did, expires_at)
+
         if not is_admin:
             session["loot_progress"] = 0
             session["loot_progress_expires"] = None
 
-        # Handle special referrer redirect
-        ref = request.referrer or ""
-        if "loot-link.com" in ref or "lootdest.org" in ref:
-            return redirect(f"{FRONTEND_ORIGIN}/keys.html?highlight={new_key}")
-
-        # Normal JSON response
         return jsonify({
             "ok": True,
             "key": new_key,
@@ -588,9 +592,10 @@ def generate_key_route():
             "message": f"Welcome {username}, here’s your new key."
         }), 200
 
-    except Exception:
-        logger.exception(f"Key generation failed for user={session.get('user')}")
+    except Exception as e:
+        logger.exception(f"Key generation failed for user={session.get('user')}: {e}")
         return jsonify({"ok": False, "message": "server error"}), 500
+
 
 
 
