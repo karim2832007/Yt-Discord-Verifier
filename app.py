@@ -30,7 +30,226 @@ from urllib.parse import unquote_plus
 # -----------------------------------------------------------------------------
 load_dotenv()
 app = Flask(__name__, static_folder="static")
-app.secret_key = os.environ.get("SECRET_KEY", secrets.token_hex(32))
+app.secret_key = os.environ.get("SECRET_KEY", secrets.token_hex(32))# ---------- Replacement: persistent click mapping + start_step/checkpoint/postback/verify_click ----------
+import sqlite3
+import logging
+from flask import g
+
+LOGGER = logging.getLogger("verifier.clicks")
+LOGGER.setLevel(logging.INFO)
+
+CLICK_DB = os.environ.get("CLICK_DB", os.path.join(os.getcwd(), "clicks.sqlite"))
+FRONTEND_ORIGIN = os.environ.get("FRONTEND_ORIGIN", "https://gaming-mods.com")
+
+def _get_db():
+    db = getattr(g, "_click_db", None)
+    if db is None:
+        db = sqlite3.connect(CLICK_DB, detect_types=sqlite3.PARSE_DECLTYPES)
+        db.row_factory = sqlite3.Row
+        g._click_db = db
+    return db
+
+@app.teardown_appcontext
+def _close_db(exc):
+    db = getattr(g, "_click_db", None)
+    if db is not None:
+        db.close()
+
+def _ensure_table():
+    db = _get_db()
+    db.execute("""
+      CREATE TABLE IF NOT EXISTS clicks (
+        token TEXT PRIMARY KEY,
+        loot_click_id TEXT UNIQUE,
+        session_id TEXT,
+        step INTEGER,
+        status TEXT,
+        created_at INTEGER,
+        confirmed_at INTEGER,
+        used_at INTEGER,
+        expires_at INTEGER
+      );
+    """)
+    db.commit()
+
+# ensure table exists
+with app.app_context():
+    _ensure_table()
+
+def _now():
+    return int(time.time())
+
+def _gen(n=24):
+    return secrets.token_urlsafe(n)
+
+def _insert_click(token, session_id, step, status="pending", click_id=None, ttl=3600):
+    db = _get_db()
+    now = _now()
+    expires = now + int(ttl)
+    db.execute(
+        "INSERT OR REPLACE INTO clicks (token, loot_click_id, session_id, step, status, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (token, click_id, session_id, step, status, now, expires)
+    )
+    db.commit()
+
+def _find_by_token(token):
+    if not token: return None
+    row = _get_db().execute("SELECT * FROM clicks WHERE token = ? LIMIT 1", (token,)).fetchone()
+    return dict(row) if row else None
+
+def _find_by_clickid(click_id):
+    if not click_id: return None
+    row = _get_db().execute("SELECT * FROM clicks WHERE loot_click_id = ? LIMIT 1", (click_id,)).fetchone()
+    return dict(row) if row else None
+
+def _confirm_token(token, click_id):
+    now = _now()
+    db = _get_db()
+    db.execute("UPDATE clicks SET status='confirmed', loot_click_id=?, confirmed_at=? WHERE token=?", (click_id, now, token))
+    db.commit()
+
+def _confirm_clickid(click_id):
+    now = _now()
+    db = _get_db()
+    row = db.execute("SELECT token FROM clicks WHERE loot_click_id = ? LIMIT 1", (click_id,)).fetchone()
+    if row:
+        token = row["token"]
+        db.execute("UPDATE clicks SET status='confirmed', confirmed_at=? WHERE token=?", (now, token))
+        db.commit()
+        return token
+    return None
+
+def _placeholder_for_clickid(click_id, step=None, ttl=3600):
+    token = _gen(28)
+    now = _now()
+    expires = now + int(ttl)
+    db = _get_db()
+    db.execute(
+        "INSERT INTO clicks (token, loot_click_id, session_id, step, status, created_at, confirmed_at, expires_at) VALUES (?, ?, ?, ?, 'confirmed', ?, ?, ?)",
+        (token, click_id, None, step, now, now, expires)
+    )
+    db.commit()
+    return token
+
+def _mark_used(token):
+    now = _now()
+    db = _get_db()
+    db.execute("UPDATE clicks SET status='used', used_at=? WHERE token=?", (now, token))
+    db.commit()
+
+# ---- CORS helper (keeps behavior you had) ----
+@app.after_request
+def _add_cors(resp):
+    origin = request.headers.get("Origin", "")
+    if origin == FRONTEND_ORIGIN:
+        resp.headers["Access-Control-Allow-Origin"] = origin
+        resp.headers["Access-Control-Allow-Credentials"] = "true"
+    resp.headers["Access-Control-Allow-Methods"] = "GET,POST,OPTIONS"
+    resp.headers["Access-Control-Allow-Headers"] = "Content-Type"
+    resp.headers["Vary"] = "Origin"
+    return resp
+
+# ---- Start Step ----
+@app.route("/start_step", methods=["POST"])
+def start_step():
+    data = request.get_json(silent=True) or {}
+    try:
+        step = int(data.get("step", 0))
+    except Exception:
+        return jsonify({"ok": False, "message": "invalid step"}), 400
+    if step not in (1, 2, 3):
+        return jsonify({"ok": False, "message": "invalid step"}), 400
+
+    sid = session.get("_sid")
+    if not sid:
+        sid = _gen(16)
+        session["_sid"] = sid
+
+    token = _gen(32)
+    _insert_click(token=token, session_id=sid, step=step, status="pending", click_id=None, ttl=3600)
+    verifier_dest = f"https://verifier.gaming-mods.com/verify_click?token={token}"
+    LOGGER.info("start_step created token=%s step=%s session=%s", token, step, sid)
+    return jsonify({"ok": True, "verifier_dest": verifier_dest, "token": token}), 200
+
+# ---- Checkpoint ----
+@app.route("/checkpoint", methods=["GET", "OPTIONS"])
+def checkpoint():
+    if request.method == "OPTIONS":
+        return ("", 204)
+    progress = int(session.get("loot_progress", 0) or 0)
+    expires = session.get("loot_progress_expires")
+    if expires and time.time() > expires:
+        session["loot_progress"] = 0
+        progress = 0
+    return jsonify({"ok": True, "progress": progress})
+
+# ---- Postback ----
+@app.route("/postback", methods=["GET", "POST"])
+def postback():
+    click_id = request.values.get("click") or request.values.get("CLICK_ID") or request.values.get("click_id")
+    token = request.values.get("token")
+    if not click_id:
+        return ("", 204)
+
+    LOGGER.info("postback received click=%s token=%s", click_id, token)
+
+    if token:
+        rec = _find_by_token(token)
+        if rec:
+            _confirm_token(token, click_id)
+            LOGGER.info("postback: token %s confirmed -> click %s", token, click_id)
+            return ("", 200)
+
+    rec = _find_by_clickid(click_id)
+    if rec:
+        _confirm_clickid(click_id)
+        LOGGER.info("postback: existing click mapping confirmed click=%s token=%s", click_id, rec.get("token"))
+        return ("", 200)
+
+    placeholder = _placeholder_for_clickid(click_id, step=None, ttl=3600)
+    LOGGER.info("postback: created placeholder token=%s for click=%s", placeholder, click_id)
+    return ("", 200)
+
+# ---- Verify Click ----
+@app.route("/verify_click", methods=["GET"])
+def verify_click():
+    token = request.args.get("token")
+    click_id = request.args.get("click") or request.args.get("CLICK_ID") or request.args.get("click_id")
+    LOGGER.info("verify_click called token=%s click=%s ref=%s", token, click_id, request.referrer)
+
+    rec = None
+    if token:
+        rec = _find_by_token(token)
+    elif click_id:
+        rec = _find_by_clickid(click_id)
+
+    if not rec:
+        if click_id:
+            _placeholder_for_clickid(click_id, step=None, ttl=3600)
+        LOGGER.info("verify_click: no record; redirecting pending")
+        return redirect(FRONTEND_ORIGIN + "/checkpoint.html?pending=1")
+
+    # wait briefly for postback to mark confirmed (race tolerance)
+    for _ in range(8):
+        rec = _find_by_token(rec["token"])
+        if rec and rec.get("status") == "confirmed":
+            break
+        time.sleep(0.25)
+
+    if not rec or rec.get("status") != "confirmed":
+        LOGGER.info("verify_click: record not confirmed token=%s click=%s status=%s", rec["token"] if rec else None, click_id, rec.get("status") if rec else None)
+        return redirect(FRONTEND_ORIGIN + "/checkpoint.html?pending=1")
+
+    # confirmed: map progress to session
+    step = rec.get("step") or 1
+    if rec.get("session_id"):
+        session["_sid"] = rec.get("session_id")
+    session["loot_progress"] = int(step)
+    session["loot_progress_expires"] = time.time() + 24 * 3600
+    _mark_used(rec["token"])
+    LOGGER.info("verify_click: success token=%s step=%s session=%s", rec["token"], step, session.get("_sid"))
+    return redirect(FRONTEND_ORIGIN + "/checkpoint.html")
+
 app.permanent_session_lifetime = timedelta(days=1)
 
 LOOTLABS_API_BASE = os.environ.get("LOOTLABS_API_BASE", "https://creators.lootlabs.gg/api/public")
@@ -384,19 +603,7 @@ def verify_state(s: str) -> bool:
 # -----------------------------------------------------------------------------
 # Routes: Portal / Login / Logout / Status / Health
 # -----------------------------------------------------------------------------
-import os, secrets, time
-from flask import Flask, jsonify, request, redirect, session
 
-app = Flask(__name__)
-app.secret_key = secrets.token_urlsafe(32)  # replace with secure env secret
-
-# Session cookie settings to allow cross-site usage when needed
-app.config.update(
-    SESSION_COOKIE_DOMAIN=os.environ.get("SESSION_COOKIE_DOMAIN", None),
-    SESSION_COOKIE_SECURE=True,
-    SESSION_COOKIE_SAMESITE="None",
-    PROPAGATE_EXCEPTIONS=True,
-)
 
 # In-memory stores (replace with Redis/DB in production)
 clicks_store = {}
