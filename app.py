@@ -467,6 +467,16 @@ def health():
 def index_redirect():
     return redirect(IONOS_INDEX)
 
+
+@app.route('/favicon.ico')
+def favicon():
+    return send_from_directory(
+        os.path.join(app.root_path, 'static'),
+        'favicon.ico',
+        mimetype='image/vnd.microsoft.icon'
+    )
+
+
 # ---------- OAuth ----------
 @app.route("/login/discord")
 def login_discord():
@@ -692,6 +702,11 @@ def api_keys():
 @app.route("/admin/api/generate_custom_key", methods=["POST"])
 def api_generate_custom_key():
     return generate_key_route()  # reuse your generate_key function
+
+@app.route("/admin/api/generate_custom_key", methods=["POST"])
+def api_generate_custom_key():
+    return generate_custom_key_route()
+
     
 @app.route("/admin/api/me", methods=["GET"])
 def api_me():
