@@ -384,6 +384,30 @@ def verify_state(s: str) -> bool:
 # -----------------------------------------------------------------------------
 # Routes: Portal / Login / Logout / Status / Health
 # -----------------------------------------------------------------------------
+from flask import Flask, jsonify, request, make_response
+# After app init
+@app.after_request
+def add_cors(resp):
+    origin = request.headers.get('Origin', '')
+    if origin == 'https://gaming-mods.com':
+        resp.headers['Access-Control-Allow-Origin'] = origin
+        resp.headers['Access-Control-Allow-Credentials'] = 'true'
+        resp.headers['Vary'] = 'Origin'
+    resp.headers['Access-Control-Allow-Methods'] = 'GET, OPTIONS'
+    resp.headers['Access-Control-Allow-Headers'] = 'Content-Type'
+    return resp
+
+@app.route('/checkpoint', methods=['GET', 'OPTIONS'])
+def checkpoint():
+    if request.method == 'OPTIONS':
+        return ('', 204)
+    progress = session.get('loot_progress', 0)
+    expires = session.get('loot_progress_expires')
+    if expires and time.time() > expires:
+        progress = 0
+        session['loot_progress'] = 0
+    return jsonify({'ok': True, 'progress': int(progress)})
+
 
 @app.route("/checkpoint_step1")
 def checkpoint_step1():
