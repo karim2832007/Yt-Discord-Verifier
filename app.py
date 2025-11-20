@@ -692,6 +692,22 @@ def api_keys():
 @app.route("/admin/api/generate_custom_key", methods=["POST"])
 def api_generate_custom_key():
     return generate_key_route()  # reuse your generate_key function
+    
+@app.route("/admin/api/me", methods=["GET"])
+def api_me():
+    try:
+        user = session.get("user")
+        if not user:
+            return jsonify({"ok": False, "message": "Not logged in"}), 401
+        return jsonify({
+            "ok": True,
+            "id": str(user.get("id")),
+            "username": user.get("username", ""),
+            "is_admin": OWNER_ID and str(user.get("id")) == str(OWNER_ID)
+        }), 200
+    except Exception:
+        logger.exception("Failed to fetch /me")
+        return jsonify({"ok": False, "message": "server error"}), 500
 
 
 @app.route("/validate_key/<path:key>", methods=["GET"])
