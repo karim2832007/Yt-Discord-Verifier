@@ -169,14 +169,8 @@ init_db()
 
 # ---------- Key helpers ----------
 def create_new_key(did: Optional[str], duration_seconds: int = 86400) -> str:
-    """
-    Create a new random key for a Discord user ID (did).
-    - duration_seconds: how long the key should be valid (default 24h).
-    - returns the generated key string.
-    """
     with _conn() as conn:
         if did:
-            # Ensure only one active key per user
             conn.execute("DELETE FROM issued_keys WHERE did = ?", (did,))
         key = secrets.token_urlsafe(10)
         expires_at = time.time() + duration_seconds
