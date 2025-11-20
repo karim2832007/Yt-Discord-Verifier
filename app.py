@@ -588,6 +588,32 @@ def keys_list():
         logger.exception("Failed to list keys")
         return jsonify({"ok": False, "message": "server error"}), 500
 
+@app.route("/issued_keys", methods=["GET"])
+def issued_keys_route():
+    try:
+        user = session.get("user")
+        if not user:
+            return jsonify({"ok": False, "message": "Not logged in"}), 401
+
+        did = str(user.get("id"))
+        rows = list_keys_for_did(did)  # returns list of rows from DB
+
+        keys = []
+        for row in rows:
+            keys.append({
+                "key": row[0],
+                "expires_at": row[1],
+                "did": did,
+                "used": row[2] if len(row) > 2 else 0
+            })
+
+        return jsonify({"ok": True, "keys": keys}), 200
+
+    except Exception:
+        logger.exception("Failed to load issued keys")
+        return jsonify({"ok": False, "message": "server error"}), 500
+
+
 @app.route("/revoke_expired", methods=["POST"])
 def revoke_expired():
     try:
