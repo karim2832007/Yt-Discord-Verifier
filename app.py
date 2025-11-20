@@ -403,6 +403,22 @@ def checkpoint_step3():
         session["loot_progress"] = 3
     return redirect("https://gaming-mods.com/checkpoint.html")
 
+
+@app.route("/postback", methods=["GET"])
+def lootlabs_postback():
+    click_id = request.args.get("click")
+    uid = request.args.get("uid")
+    ip = request.args.get("ip")
+
+    # Verify and update progress
+    progress = session.get("loot_progress", 0)
+    session["loot_progress"] = progress + 1
+    session["loot_progress_expires"] = time.time() + 24*60*60
+
+    return jsonify({"ok": True, "message": "Progress updated"}), 200
+
+    
+
 @app.route("/portal/me")
 def portal_me():
     user = session.get("user")
