@@ -384,64 +384,144 @@ def verify_state(s: str) -> bool:
 # -----------------------------------------------------------------------------
 # Routes: Portal / Login / Logout / Status / Health
 # -----------------------------------------------------------------------------
-from flask import Flask, jsonify, request, make_response
-# After app init
+import os, secrets, time
+from flask import Flask, jsonify, request, redirect, session
+
+app = Flask(__name__)
+app.secret_key = secrets.token_urlsafe(32)  # replace with secure env secret
+
+# Session cookie settings to allow cross-site usage when needed
+app.config.update(
+    SESSION_COOKIE_DOMAIN=os.environ.get("SESSION_COOKIE_DOMAIN", None),
+    SESSION_COOKIE_SECURE=True,
+    SESSION_COOKIE_SAMESITE="None",
+    PROPAGATE_EXCEPTIONS=True,
+)
+
+# In-memory stores (replace with Redis/DB in production)
+clicks_store = {}
+clicks_by_clickid = {}
+
+# ---- CORS ----
 @app.after_request
 def add_cors(resp):
     origin = request.headers.get('Origin', '')
     if origin == 'https://gaming-mods.com':
         resp.headers['Access-Control-Allow-Origin'] = origin
         resp.headers['Access-Control-Allow-Credentials'] = 'true'
-        resp.headers['Vary'] = 'Origin'
-    resp.headers['Access-Control-Allow-Methods'] = 'GET, OPTIONS'
+    resp.headers['Access-Control-Allow-Methods'] = 'GET,POST,OPTIONS'
     resp.headers['Access-Control-Allow-Headers'] = 'Content-Type'
+    resp.headers['Vary'] = 'Origin'
     return resp
 
+# ---- Start Step ----
+@app.route('/start_step', methods=['POST'])
+def start_step():
+    data = request.get_json() or {}
+    step = int(data.get('step', 0))
+    if step not in (1, 2, 3):
+        return jsonify({'ok': False, 'message': 'invalid step'}), 400
+
+    sid = session.get('_sid')
+    if not sid:
+        sid = secrets.token_urlsafe(16)
+        session['_sid'] = sid
+
+    token = secrets.token_urlsafe(32)
+    now = time.time()
+    clicks_store[token] = {
+        'token': token,
+        'session_id': sid,
+        'step': step,
+        'created_at': now,
+        'expires_at': now + 3600,
+        'status': 'pending',
+        'click_id': None
+    }
+
+    verifier_dest = f'https://verifier.gaming-mods.com/verify_click?token={token}'
+    return jsonify({'ok': True, 'verifier_dest': verifier_dest, 'token': token}), 200
+
+# ---- Checkpoint ----
 @app.route('/checkpoint', methods=['GET', 'OPTIONS'])
 def checkpoint():
     if request.method == 'OPTIONS':
         return ('', 204)
-    progress = session.get('loot_progress', 0)
+    progress = int(session.get('loot_progress', 0) or 0)
     expires = session.get('loot_progress_expires')
     if expires and time.time() > expires:
         progress = 0
         session['loot_progress'] = 0
-    return jsonify({'ok': True, 'progress': int(progress)})
+    return jsonify({'ok': True, 'progress': progress})
 
+# ---- Postback ----
+@app.route('/postback', methods=['GET','POST'])
+def postback():
+    click_id = request.values.get('click') or request.values.get('CLICK_ID')
+    token = request.values.get('token')
+    if not click_id:
+        return ('', 204)
 
-@app.route("/checkpoint_step1")
-def checkpoint_step1():
-    session["loot_progress"] = 1
-    session["loot_progress_expires"] = time.time() + 24*60*60
-    return redirect("https://gaming-mods.com/checkpoint.html")
+    if token and token in clicks_store:
+        clicks_store[token]['status'] = 'confirmed'
+        clicks_store[token]['click_id'] = click_id
+        clicks_by_clickid[click_id] = token
+        return ('', 200)
 
-@app.route("/checkpoint_step2")
-def checkpoint_step2():
-    if session.get("loot_progress") == 1:
-        session["loot_progress"] = 2
-    return redirect("https://gaming-mods.com/checkpoint.html")
+    if click_id in clicks_by_clickid:
+        t = clicks_by_clickid[click_id]
+        clicks_store[t]['status'] = 'confirmed'
+        clicks_store[t]['click_id'] = click_id
+        return ('', 200)
 
-@app.route("/checkpoint_step3")
-def checkpoint_step3():
-    if session.get("loot_progress") == 2:
-        session["loot_progress"] = 3
-    return redirect("https://gaming-mods.com/checkpoint.html")
+    # Create placeholder if unmapped
+    token0 = secrets.token_urlsafe(24)
+    clicks_store[token0] = {
+        'token': token0,
+        'session_id': None,
+        'step': None,
+        'created_at': time.time(),
+        'expires_at': time.time() + 3600,
+        'status': 'confirmed',
+        'click_id': click_id
+    }
+    clicks_by_clickid[click_id] = token0
+    return ('', 200)
 
+# ---- Verify Click ----
+@app.route('/verify_click', methods=['GET'])
+def verify_click():
+    token = request.args.get('token')
+    click_id = request.args.get('click')
+    record = None
 
-@app.route("/postback", methods=["GET"])
-def lootlabs_postback():
-    click_id = request.args.get("click")
-    uid = request.args.get("uid")
-    ip = request.args.get("ip")
+    if token:
+        record = clicks_store.get(token)
+    elif click_id:
+        tk = clicks_by_clickid.get(click_id)
+        if tk:
+            record = clicks_store.get(tk)
 
-    # Verify and update progress
-    progress = session.get("loot_progress", 0)
-    session["loot_progress"] = progress + 1
-    session["loot_progress_expires"] = time.time() + 24*60*60
+    if not record:
+        return redirect('https://gaming-mods.com/checkpoint.html?error=access_denied')
 
-    return jsonify({"ok": True, "message": "Progress updated"}), 200
+    # tolerate race with postback
+    for _ in range(3):
+        if record.get('status') == 'confirmed':
+            break
+        time.sleep(0.3)
 
-    
+    if record.get('status') != 'confirmed':
+        return redirect('https://gaming-mods.com/checkpoint.html?error=not_confirmed')
+
+    session['_sid'] = record.get('session_id') or session.get('_sid', secrets.token_urlsafe(16))
+    session['loot_progress'] = int(record.get('step') or 0)
+    session['loot_progress_expires'] = time.time() + 24*3600
+    record['status'] = 'used'
+    record['used_at'] = time.time()
+
+    return redirect('https://gaming-mods.com/checkpoint.html')
+
 
 @app.route("/portal/me")
 def portal_me():
@@ -584,19 +664,31 @@ def discord_callback_plain():
 @app.route("/generate_key", methods=["GET", "POST"])
 def generate_key_route():
     try:
+        # Require login
         user = session.get("user")
         if not user:
             return jsonify({"ok": False, "message": "Not logged in"}), 401
 
+        # Require all steps complete
+        if int(session.get("loot_progress", 0)) != 3:
+            return jsonify({"ok": False, "message": "You must complete all steps"}), 403
+
         did = str(user.get("id")) if user.get("id") else None
         username = user.get("username", "")
 
+        # Create and persist new key
         new_key = create_new_key(did)
 
-        ref = request.referrer or ""
-        if "loot-link.com" in ref:
-            return redirect("https://gaming-mods.com/keys.html")
+        # Reset progress after key generation
+        session["loot_progress"] = 0
+        session["loot_progress_expires"] = None
 
+        # If coming from LootLabs redirect, send user back to keys page
+        ref = request.referrer or ""
+        if "loot-link.com" in ref or "lootdest.org" in ref:
+            return redirect("https://gaming-mods.com/keys.html?highlight=" + new_key)
+
+        # Otherwise return JSON for UI
         return jsonify({
             "ok": True,
             "key": new_key,
@@ -607,6 +699,7 @@ def generate_key_route():
     except Exception:
         app.logger.exception("Key generation failed")
         return jsonify({"ok": False, "message": "server error"}), 500
+
 
 # -----------------------------------------------------------------------------
 # List all keys for the logged-in user
