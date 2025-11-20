@@ -56,8 +56,17 @@ app.config.update(
     SESSION_COOKIE_SAMESITE="None",
     PROPAGATE_EXCEPTIONS=True,
 )
-CORS(app, origins=[o.strip() for o in FRONTEND_ORIGINS], supports_credentials=True)
-CORS(app, resources={r"/admin/api/*": {"origins": "https://gaming-mods.com"}})
+
+# Enable CORS for your frontend domain(s)
+CORS(
+    app,
+    resources={
+        r"/admin/api/*": {"origins": "https://gaming-mods.com"},
+        r"/*": {"origins": [o.strip() for o in FRONTEND_ORIGINS]}
+    },
+    supports_credentials=True
+)
+
 # ---------- Logging ----------
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(APP_NAME)
@@ -644,6 +653,19 @@ def generate_custom_key_route():
     except Exception:
         logger.exception("Custom key generation failed")
         return jsonify({"ok": False, "message": "server error"}), 500
+
+@app.route("/admin/api/audit", methods=["GET"])
+def api_audit():
+    return admin_logins()  # reuse your existing function
+
+@app.route("/admin/api/keys", methods=["GET"])
+def api_keys():
+    return issued_keys_route()  # reuse your issued_keys function
+
+@app.route("/admin/api/generate_custom_key", methods=["POST"])
+def api_generate_custom_key():
+    return generate_key_route()  # reuse your generate_key function
+
 
 @app.route("/validate_key/<path:key>", methods=["GET"])
 @app.route("/validate_key/<did>/<path:key>", methods=["GET"])
