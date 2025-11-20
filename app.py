@@ -45,7 +45,6 @@ IONOS_INDEX = os.environ.get("IONOS_INDEX", "https://gaming-mods.com")
 UA = os.environ.get("UA", "Verifier/1.0")
 OWNER_ID = os.environ.get("OWNER_ID")
 LEGACY_LIMIT_SECONDS = 86400
-CORS(app, resources={r"/admin/api/*": {"origins": "https://gaming-mods.com"}})
 
 # ---------- App init ----------
 app = Flask(__name__, static_folder="static")
@@ -58,7 +57,7 @@ app.config.update(
     PROPAGATE_EXCEPTIONS=True,
 )
 CORS(app, origins=[o.strip() for o in FRONTEND_ORIGINS], supports_credentials=True)
-
+CORS(app, resources={r"/admin/api/*": {"origins": "https://gaming-mods.com"}})
 # ---------- Logging ----------
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(APP_NAME)
