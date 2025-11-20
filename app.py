@@ -384,6 +384,25 @@ def verify_state(s: str) -> bool:
 # -----------------------------------------------------------------------------
 # Routes: Portal / Login / Logout / Status / Health
 # -----------------------------------------------------------------------------
+
+@app.route("/checkpoint_step1")
+def checkpoint_step1():
+    session["loot_progress"] = 1
+    session["loot_progress_expires"] = time.time() + 24*60*60
+    return redirect("https://gaming-mods.com/checkpoint.html")
+
+@app.route("/checkpoint_step2")
+def checkpoint_step2():
+    if session.get("loot_progress") == 1:
+        session["loot_progress"] = 2
+    return redirect("https://gaming-mods.com/checkpoint.html")
+
+@app.route("/checkpoint_step3")
+def checkpoint_step3():
+    if session.get("loot_progress") == 2:
+        session["loot_progress"] = 3
+    return redirect("https://gaming-mods.com/checkpoint.html")
+
 @app.route("/portal/me")
 def portal_me():
     user = session.get("user")
