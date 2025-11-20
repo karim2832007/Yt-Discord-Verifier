@@ -586,30 +586,78 @@ def generate_custom_key_route():
 @app.route("/validate_key", methods=["POST"])
 def validate_key_route(key=None, did=None):
     try:
+        # Handle POST body
         if request.method == "POST":
             data = request.get_json(silent=True) or {}
             key = data.get("key")
+
+        # No key provided
         if not key:
-            return jsonify({"ok": False, "valid": False, "message": "no key provided"}), 400
+            return jsonify({
+                "ok": False,
+                "valid": False,
+                "message": "no key provided"
+            }), 400
+
+        # Normalize key
         key = unquote_plus(key).strip()
         now = time.time()
+
+        # Admin/global override
         if global_override or (did and admin_overrides.get(did)):
             expires_at = int(now) + LEGACY_LIMIT_SECONDS
-            return jsonify({"ok": True, "valid": True, "message": "ADMIN OVERRIDE ACTIVE", "expires_at": float(expires_at), "expires_in": int(expires_at - now)}), 200
+            return jsonify({
+                "ok": True,
+                "valid": True,
+                "message": "ADMIN OVERRIDE ACTIVE",
+                "expires_at": float(expires_at),
+                "expires_in": int(expires_at - now)
+            }), 200
+
+        # Lookup record
         record = get_key_record(key)
         if not record:
-            return jsonify({"ok": False, "valid": False, "message": "Key not found"}), 400
+            return jsonify({
+                "ok": False,
+                "valid": False,
+                "message": "Key not found"
+            }), 400
+
+        # Parse expiry safely
         try:
-            rec_expires_at = float(record["expires_at"])
-        except Exception:
-            return jsonify({"ok": False, "valid": False, "message": "Malformed expiry"}), 500
+            rec_expires_at = float(record.get("expires_at", 0))
+        except (ValueError, TypeError):
+            return jsonify({
+                "ok": False,
+                "valid": False,
+                "message": "Malformed expiry"
+            }), 500
+
+        # Expired key
         if now > rec_expires_at:
             burn_key(key)
-            return jsonify({"ok": False, "valid": False, "message": "Key expired"}), 410
-        return jsonify({"ok": True, "valid": True, "message": "Key is valid", "expires_at": float(rec_expires_at), "expires_in": int(rec_expires_at - now)}), 200
+            return jsonify({
+                "ok": False,
+                "valid": False,
+                "message": "Key expired"
+            }), 410
+
+        # Valid key
+        return jsonify({
+            "ok": True,
+            "valid": True,
+            "message": "Key is valid",
+            "expires_at": rec_expires_at,
+            "expires_in": int(rec_expires_at - now)
+        }), 200
+
     except Exception:
         logger.exception("Validation failed")
-        return jsonify({"ok": False, "valid": False, "message": "Server error"}), 500
+        return jsonify({
+            "ok": False,
+            "valid": False,
+            "message": "Server error"
+        }), 500
 
 # ---------- Admin endpoints ----------
 @app.route("/admin/key/<path:key>", methods=["DELETE"])
