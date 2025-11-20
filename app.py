@@ -533,7 +533,6 @@ def discord_callback_login():
 def discord_callback_plain():
     return _discord_callback()
 
-# ---------- Key generation / validation ----------
 @app.route("/generate_key", methods=["GET", "POST"])
 def generate_key_route():
     try:
@@ -541,12 +540,15 @@ def generate_key_route():
         if not user:
             return jsonify({"ok": False, "message": "Not logged in"}), 401
 
-        # Require loot progress completion
-        if int(session.get("loot_progress", 0)) != 3:
-            return jsonify({"ok": False, "message": "You must complete all steps"}), 403
-
         did = str(user.get("id")) if user.get("id") else None
         username = user.get("username", "")
+
+        # Admin override: OWNER_ID can bypass loot_progress
+        is_admin = OWNER_ID and str(user.get("id")) == str(OWNER_ID)
+
+        # Require loot progress completion unless admin
+        if not is_admin and int(session.get("loot_progress", 0)) != 3:
+            return jsonify({"ok": False, "message": "You must complete all steps"}), 403
 
         # Allow custom duration (hours) from POST body, default 24h
         hours = 24
@@ -557,9 +559,10 @@ def generate_key_route():
         expires_at = time.time() + (hours * 3600)
         new_key = create_new_key(did, expires_at=expires_at)
 
-        # Reset loot progress
-        session["loot_progress"] = 0
-        session["loot_progress_expires"] = None
+        # Reset loot progress (only for normal users)
+        if not is_admin:
+            session["loot_progress"] = 0
+            session["loot_progress_expires"] = None
 
         # Handle special referrer redirect
         ref = request.referrer or ""
@@ -575,9 +578,10 @@ def generate_key_route():
             "message": f"Welcome {username}, here’s your new key."
         }), 200
 
-    except Exception as e:
+    except Exception:
         logger.exception(f"Key generation failed for user={session.get('user')}")
         return jsonify({"ok": False, "message": "server error"}), 500
+
 
 
 @app.route("/keys", methods=["GET"])
@@ -639,20 +643,43 @@ def generate_custom_key_route():
         user = session.get("user")
         if not user:
             return jsonify({"ok": False, "message": "Not logged in"}), 401
+
+        did = str(user.get("id")) if user.get("id") else None
+        username = user.get("username", "")
+
+        # Admin override: OWNER_ID can bypass restrictions
+        is_admin = OWNER_ID and str(user.get("id")) == str(OWNER_ID)
+
         data = request.get_json(silent=True) or {}
         custom_key = data.get("key")
+
+        # Validate custom key length
+        if not custom_key or len(custom_key) < 4:
+            return jsonify({"ok": False, "message": "Key must be at least 4 chars"}), 400
+
+        # Duration handling (default 24h if not provided)
         if "duration_hours" in data:
             duration = int(data.get("duration_hours", 24)) * 3600
         else:
             duration = int(data.get("duration", 86400))
-        if not custom_key or len(custom_key) < 4:
-            return jsonify({"ok": False, "message": "Key must be at least 4 chars"}), 400
-        did = str(user.get("id")) if user.get("id") else None
+
+        expires_at = time.time() + duration
+
+        # Create the custom key
         new_key = create_custom_key(custom_key, did, duration)
-        return jsonify({"ok": True, "key": new_key, "expires_at": time.time() + duration, "message": f"Custom key created for {user.get('username','')}"}), 200
+
+        return jsonify({
+            "ok": True,
+            "key": new_key,
+            "expires_at": expires_at,
+            "expires_in": int(expires_at - time.time()),
+            "message": f"Custom key created for {username}{' (admin override)' if is_admin else ''}"
+        }), 200
+
     except Exception:
-        logger.exception("Custom key generation failed")
+        logger.exception(f"Custom key generation failed for user={session.get('user')}")
         return jsonify({"ok": False, "message": "server error"}), 500
+
 
 @app.route("/admin/api/audit", methods=["GET"])
 def api_audit():
@@ -747,61 +774,49 @@ def validate_key_route(key=None, did=None):
 
 
 # ---------- Admin endpoints ----------
+
 @app.route("/admin/key/<path:key>", methods=["DELETE"])
 def admin_burn_key(key):
     try:
-        if not (session.get("user") and (str(session.get("user").get("id")) == str(OWNER_ID) if OWNER_ID else False)):
+        user = session.get("user")
+        if not (user and str(user.get("id")) == str(OWNER_ID)):
             return jsonify({"ok": False, "message": "Forbidden"}), 403
         key = unquote_plus(key).strip()
         burn_key(key)
-        return jsonify({"ok": True, "deleted": key, "message": f"Key {key} has been burned."}), 200
+        return jsonify({
+            "ok": True,
+            "deleted": key,
+            "message": f"Key {key} has been burned."
+        }), 200
     except Exception:
         logger.exception("Failed to burn key")
         return jsonify({"ok": False, "message": "server error"}), 500
 
+
 @app.route("/admin/logins", methods=["GET"])
 def admin_logins():
     try:
-        if not (session.get("user") and (str(session.get("user").get("id")) == str(OWNER_ID) if OWNER_ID else False)):
+        user = session.get("user")
+        if not (user and str(user.get("id")) == str(OWNER_ID)):
             return jsonify({"ok": False, "message": "Forbidden"}), 403
         return jsonify({"ok": True, "logins": login_history}), 200
     except Exception:
         logger.exception("Failed to fetch admin logins")
         return jsonify({"ok": False, "message": "server error"}), 500
 
-@app.route("/override/all", methods=["GET", "POST", "DELETE"])
-def override_all():
-    try:
-        if not (session.get("user") and (str(session.get("user").get("id")) == str(OWNER_ID) if OWNER_ID else False)):
-            return jsonify({"ok": False, "message": "Forbidden"}), 403
-        if request.method == "GET":
-            return jsonify({"ok": True, "global_override": bool(global_override)}), 200
-        if request.method == "POST":
-            set_global_override(True)
-            return jsonify({"ok": True, "global_override": True}), 200
-        if request.method == "DELETE":
-            set_global_override(False)
-            return jsonify({"ok": True, "global_override": False}), 200
-        return jsonify({"ok": False, "message": "Method not allowed"}), 405
-    except Exception:
-        logger.exception("override_all failed")
-        return jsonify({"ok": False, "message": "server error"}), 500
 
 @app.route("/override/global", methods=["GET", "POST", "DELETE"])
 def override_global():
     try:
         user = session.get("user")
-        if not (user and (str(user.get("id")) == str(OWNER_ID) if OWNER_ID else False)):
+        if not (user and str(user.get("id")) == str(OWNER_ID)):
             return jsonify({"ok": False, "message": "Forbidden"}), 403
 
         if request.method == "GET":
-            return jsonify({
-                "ok": True,
-                "global_override": bool(global_override)
-            }), 200
+            return jsonify({"ok": True, "global_override": bool(global_override)}), 200
 
         if request.method == "POST":
-            expires_at = time.time() + (24 * 3600)  # default 24h
+            expires_at = time.time() + (24 * 3600)
             set_global_override(True, expires_at=expires_at)
             return jsonify({
                 "ok": True,
@@ -812,13 +827,9 @@ def override_global():
 
         if request.method == "DELETE":
             set_global_override(False)
-            return jsonify({
-                "ok": True,
-                "global_override": False
-            }), 200
+            return jsonify({"ok": True, "global_override": False}), 200
 
         return jsonify({"ok": False, "message": "Method not allowed"}), 405
-
     except Exception:
         logger.exception("override_global failed")
         return jsonify({"ok": False, "message": "server error"}), 500
@@ -828,7 +839,7 @@ def override_global():
 def override_user(did):
     try:
         user = session.get("user")
-        if not (user and (str(user.get("id")) == str(OWNER_ID) if OWNER_ID else False)):
+        if not (user and str(user.get("id")) == str(OWNER_ID)):
             return jsonify({"ok": False, "message": "Forbidden"}), 403
 
         if request.method == "GET":
@@ -839,7 +850,7 @@ def override_user(did):
             }), 200
 
         if request.method == "POST":
-            expires_at = time.time() + (24 * 3600)  # default 24h
+            expires_at = time.time() + (24 * 3600)
             set_user_override(did, {"username": "", "discriminator": "", "expires_at": expires_at})
             return jsonify({
                 "ok": True,
@@ -858,7 +869,6 @@ def override_user(did):
             }), 200
 
         return jsonify({"ok": False, "message": "Method not allowed"}), 405
-
     except Exception:
         logger.exception(f"override_user failed for did={did}")
         return jsonify({"ok": False, "message": "server error"}), 500
@@ -867,7 +877,8 @@ def override_user(did):
 @app.route("/remove_role_now/<did>", methods=["POST"])
 def remove_role_now(did):
     try:
-        if not (session.get("user") and (str(session.get("user").get("id")) == str(OWNER_ID) if OWNER_ID else False)):
+        user = session.get("user")
+        if not (user and str(user.get("id")) == str(OWNER_ID)):
             return jsonify({"ok": False, "message": "Forbidden"}), 403
         success = discord_remove_role(did)
         return jsonify({"ok": success, "discord_id": did}), (200 if success else 500)
@@ -875,25 +886,32 @@ def remove_role_now(did):
         logger.exception("remove_role_now failed")
         return jsonify({"ok": False, "message": "server error"}), 500
 
+
 @app.route("/remove_role_all", methods=["POST"])
 def remove_role_all():
     try:
-        if not (session.get("user") and (str(session.get("user").get("id")) == str(OWNER_ID) if OWNER_ID else False)):
+        user = session.get("user")
+        if not (user and str(user.get("id")) == str(OWNER_ID)):
             return jsonify({"ok": False, "message": "Forbidden"}), 403
+
         if not DISCORD_GUILD_ID or not DISCORD_BOT_TOKEN or not DISCORD_ROLE_ID:
             return jsonify({"ok": False, "message": "Missing guild or bot token"}), 400
+
         url = f"https://discord.com/api/guilds/{DISCORD_GUILD_ID}/members?limit=1000"
         headers = {"Authorization": f"Bot {DISCORD_BOT_TOKEN}", "User-Agent": UA}
         r = requests.get(url, headers=headers, timeout=20)
         if r.status_code != 200:
             return jsonify({"ok": False, "message": "Failed to fetch members", "status": r.status_code}), 500
+
         members = r.json()
         removed, failed = [], []
         for m in members:
             try:
                 did = str(m["user"]["id"])
-                r2 = requests.delete(f"https://discord.com/api/guilds/{DISCORD_GUILD_ID}/members/{did}/roles/{DISCORD_ROLE_ID}",
-                                     headers=headers, timeout=10)
+                r2 = requests.delete(
+                    f"https://discord.com/api/guilds/{DISCORD_GUILD_ID}/members/{did}/roles/{DISCORD_ROLE_ID}",
+                    headers=headers, timeout=10
+                )
                 if r2.status_code in (200, 204):
                     removed.append(did)
                 else:
@@ -901,21 +919,31 @@ def remove_role_all():
             except Exception:
                 logger.exception("Error removing role")
                 failed.append(did)
-        return jsonify({"ok": True, "removed_count": len(removed), "failed_count": len(failed), "removed_sample": removed[:10], "failed_sample": failed[:10]}), 200
+
+        return jsonify({
+            "ok": True,
+            "removed_count": len(removed),
+            "failed_count": len(failed),
+            "removed_sample": removed[:10],
+            "failed_sample": failed[:10]
+        }), 200
     except Exception:
         logger.exception("remove_role_all failed")
         return jsonify({"ok": False, "message": "server error"}), 500
 
+
 @app.route("/admin/keys/purge", methods=["POST"])
 def purge_keys():
     try:
-        if not (session.get("user") and (str(session.get("user").get("id")) == str(OWNER_ID) if OWNER_ID else False)):
+        user = session.get("user")
+        if not (user and str(user.get("id")) == str(OWNER_ID)):
             return jsonify({"ok": False, "message": "Forbidden"}), 403
         purge_expired()
-        return jsonify({"ok": True}), 200
+        return jsonify({"ok": True, "message": "Expired keys purged"}), 200
     except Exception:
         logger.exception("purge_keys failed")
         return jsonify({"ok": False, "message": "server error"}), 500
+
 
 @app.route("/debug/env")
 def debug_env():
