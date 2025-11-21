@@ -459,7 +459,6 @@ def login_discord():
         "response_type": "code",
         "scope": "identify email",
         "state": state,
-        "prompt": "none"
     }
     url = f"{app.cfg.DISCORD_API_BASE}/oauth2/authorize?" + "&".join([f"{k}={requests.utils.requote_uri(str(v))}" for k, v in params.items()])
     return redirect(url)
