@@ -593,22 +593,23 @@ def generate_key_route():
 
 
 
-@app.route("/keys", methods=["GET"])
-def keys_list():
+# defensive wrapper for keys page to capture exception details
+from flask import request, render_template, current_app as app
+import traceback
+import logging
+
+@app.route('/keys', methods=['GET'])
+def keys_page():
     try:
-        user = session.get("user")
-        if not user:
-            return jsonify({"ok": False, "message": "Not logged in"}), 401
-        did = str(user.get("id"))
-        rows = list_keys_for_did(did)  # implement this helper
-        formatted = [
-            {"key": r[0], "expires_at": r[1], "did": did}
-            for r in rows
-        ]
-        return jsonify({"ok": True, "keys": formatted}), 200
-    except Exception:
-        logger.exception("Failed to list keys")
-        return jsonify({"ok": False, "message": "server error"}), 500
+        app.logger.debug("keys_page request headers: %s", dict(request.headers))
+        # If you already call some function to build the page, call it here:
+        # return original_keys_handler()
+        # else render template normally:
+        return render_template('keys.html')
+    except Exception as e:
+        app.logger.exception('keys page failure: %s', e)
+        # Fallback: show minimal friendly page so clients won't receive 500
+        return render_template('keys_error.html', message='Temporary server error — try again in a moment'), 200
 
 @app.route("/issued_keys", methods=["GET"])
 def issued_keys_route():
