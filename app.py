@@ -655,15 +655,12 @@ def generate_custom_key_route():
         if not user:
             return jsonify({"ok": False, "message": "Not logged in"}), 401
 
-        did = str(user.get("id")) if user.get("id") else None
-        username = user.get("username", "")
-
-        # Admin override: OWNER_ID can bypass restrictions
+        # Admin override check
         is_admin = OWNER_ID and str(user.get("id")) == str(OWNER_ID)
 
-        # Parse request body
         data = request.get_json(silent=True) or {}
         custom_key = (data.get("key") or "").strip()
+        target_did = str(data.get("did")) if data.get("did") else (str(user.get("id")) if user.get("id") else None)
 
         # Validate custom key
         if not custom_key:
@@ -671,31 +668,37 @@ def generate_custom_key_route():
         if len(custom_key) < 4:
             return jsonify({"ok": False, "message": "Key must be at least 4 chars"}), 400
 
-        # Duration handling (default 24h if not provided)
+        # Duration handling
         try:
             if "duration_hours" in data:
                 duration = int(data.get("duration_hours", 24)) * 3600
             else:
                 duration = int(data.get("duration", 86400))
         except Exception:
-            duration = 86400  # fallback to 24h
+            duration = 86400
 
         expires_at = time.time() + duration
 
-        # Create the custom key in DB
-        new_key = create_custom_key(custom_key, did, duration)
+        # Only admins can assign keys to other DIDs
+        if not is_admin and target_did != str(user.get("id")):
+            return jsonify({"ok": False, "message": "Forbidden: cannot assign keys to other users"}), 403
+
+        # Create the custom key
+        new_key = create_custom_key(custom_key, target_did, duration)
 
         return jsonify({
             "ok": True,
             "key": new_key,
+            "did": target_did,
             "expires_at": int(expires_at),
             "expires_in": max(0, int(expires_at - time.time())),
-            "message": f"Custom key created for {username}{' (admin override)' if is_admin else ''}"
+            "message": f"Custom key '{new_key}' created for DID {target_did}{' (admin override)' if is_admin else ''}"
         }), 200
 
     except Exception as e:
-        logger.exception(f"Custom key generation failed for user={session.get('user')}: {e}")
+        logger.exception(f"Custom key generation failed: {e}")
         return jsonify({"ok": False, "message": "server error"}), 500
+
 
 
 @app.route("/admin/api/audit", methods=["GET"])
