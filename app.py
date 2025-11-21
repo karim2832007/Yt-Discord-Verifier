@@ -82,7 +82,7 @@ def create_app(config: Optional[Config] = None) -> Flask:
     app.cfg = cfg
     logger = make_logger(logfile=cfg.LOG_FILE)
     app.logger_custom = logger
-
+CORS(app, supports_credentials=True, origins=["https://gaming-mods.com"])
     # request-id and logging
     @app.before_request
     def assign_request_id():
