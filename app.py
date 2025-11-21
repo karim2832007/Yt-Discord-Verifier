@@ -565,6 +565,20 @@ def health_alias():
     """
     return jsonify({"ok": True, "status": "healthy", "req_id": getattr(g, "request_id", None)}), 200
 
+@app.route('/__debug_me')
+def __debug_me():
+    import os
+    return jsonify({
+        'ok': True,
+        'pid': os.getpid(),
+        'file': __file__,
+        'env': {
+            'DISCORD_CLIENT_ID': bool(os.getenv('DISCORD_CLIENT_ID')),
+            'DISCORD_CLIENT_SECRET': bool(os.getenv('DISCORD_CLIENT_SECRET')),
+            'DISCORD_REDIRECT': bool(os.getenv('DISCORD_REDIRECT'))
+        }
+    })
+
 # run for local debug
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "8000")), debug=app.config.get("DEBUG", False))
