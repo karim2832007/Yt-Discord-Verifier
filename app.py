@@ -77,24 +77,33 @@ def create_app(config: Optional[Config] = None) -> Flask:
         DEBUG=cfg.DEBUG,
         ENV=cfg.ENV,
         SESSION_COOKIE_SAMESITE=cfg.SESSION_COOKIE_SAMESITE,
-        SESSION_COOKIE_SECURE=cfg.SESSION_COOKIE_SECURE
+        SESSION_COOKIE_SECURE=cfg.SESSION_COOKIE_SECURE,
+        SESSION_COOKIE_DOMAIN=cfg.SESSION_COOKIE_DOMAIN
     )
-    # attach cfg and logger
+
+    # Attach config and logger
     app.cfg = cfg
     logger = make_logger(logfile=cfg.LOG_FILE)
     app.logger_custom = logger
-CORS(app, supports_credentials=True, origins=["https://gaming-mods.com"])
-    # request-id and logging
-@app.before_request
-def handle_options():
-    if request.method == 'OPTIONS':
-        return make_response('', 200)
 
+    # ✅ Apply CORS inside the function
+    CORS(app, supports_credentials=True, origins=["https://gaming-mods.com"])
+
+    # ✅ Handle OPTIONS requests
+    @app.before_request
+    def handle_options():
+        if request.method == 'OPTIONS':
+            return make_response('', 200)
+
+    # ✅ Add request-id filter for logging
     class ReqIdFilter(logging.Filter):
         def filter(self, rec):
             rec.req_id = getattr(g, "request_id", "-")
             return True
+
     logger.addFilter(ReqIdFilter())
+
+    return app
 
     # error handlers
     @app.errorhandler(400)
