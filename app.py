@@ -12,8 +12,8 @@ from typing import Optional, Dict, Any
 import importlib
 
 import requests
-from flask import Flask, request, g, jsonify, session, redirect, url_for
-
+from flask import Flask, request, g, jsonify, session, redirect, url_for, make_response
+from flask_cors import CORS
 # --- Config loader ---------------------------------------------------------
 class Config:
     def __init__(self):
@@ -538,11 +538,6 @@ try:
     _register_exception_handlers(app)
 except Exception:
     pass
-
-@app.before_request
-def handle_options():
-    if request.method == 'OPTIONS':
-        return make_response('', 200)
 
 # run for local debug
 if __name__ == "__main__":
