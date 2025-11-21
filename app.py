@@ -477,22 +477,6 @@ def admin_list_overrides():
     if not _is_admin(app, user_id):
         raise AuthorizationError("not admin")
     return jsonify({"ok": True, "overrides": list_override_audit()}), 200
-@app.route("/admin/logs")
-def admin_logs():
-    return jsonify({"logs": ["System started", "Waiting for actions..."]})
-
-@app.route("/admin/add-perk", methods=["POST"])
-def add_perk():
-    data = request.json
-    perk = data.get("perk")
-    # TODO: Add perk logic
-    return jsonify({"status": "success", "action": f"Added perk {perk}"})
-
-@app.route("/admin/remove-perk", methods=["POST"])
-def remove_perk():
-    data = request.json
-    perk = data.get("perk")
-    # TODO: Remove perk logic
 
 @app.route("/admin")
 def admin():
@@ -572,66 +556,148 @@ def login_discord_callback():
     # redirect to configured frontend after successful login
     next_url = session.pop('next', None) or "https://gaming-mods.com/"
     return redirect(next_url)
-@app.route("/admin/logs")
-def admin_logs():
-    return jsonify({"logs": ["System started", "Waiting for actions..."]})
+from functools import wraps
+from flask import request, jsonify, session, current_app, abort
 
+# Minimal admin check decorator (replace with your auth logic if different)
+def require_admin(f):
+    @wraps(f)
+    def wrapped(*args, **kwargs):
+        user = session.get("user")
+        owner_id = current_app.config.get("OWNER_ID")
+        # allow local override for testing: OWNER_ID can be str or int
+        if owner_id is not None and user and str(user.get("id")) == str(owner_id):
+            return f(*args, **kwargs)
+        return jsonify({"error": "unauthorized"}), 403
+    return wrapped
+
+# In-memory placeholders (swap for DB / persistent store)
+_ADMIN_LOGS = ["System started", "Waiting for actions..."]
+_USERS = [{"id": "123", "name": "TestUser"}]
+_KEYS = [
+    {"key": "ABC123", "type": "global", "expiry": "2025-12-01", "owner": "User#1234", "status": "active"}
+]
+_KEY_LOGS = ["Created key ABC123 for User#1234", "Revoked key XYZ789"]
+_PERKS = []
+
+# GET /admin/logs
+@app.route("/admin/logs", methods=["GET"])
+@require_admin
+def admin_logs_view():
+    return jsonify({"logs": _ADMIN_LOGS})
+
+# POST /admin/add-perk
 @app.route("/admin/add-perk", methods=["POST"])
-def add_perk():
-    perk = request.json.get("perk")
-    # TODO: Add perk logic
+@require_admin
+def admin_add_perk():
+    data = request.get_json(silent=True) or {}
+    perk = data.get("perk")
+    if not perk:
+        return jsonify({"error": "missing perk"}), 400
+    _PERKS.append(perk)
+    _ADMIN_LOGS.append(f"Added perk {perk}")
     return jsonify({"status": "success", "action": f"Added perk {perk}"})
 
+# POST /admin/remove-perk
 @app.route("/admin/remove-perk", methods=["POST"])
-def remove_perk():
-    perk = request.json.get("perk")
-    # TODO: Remove perk logic
+@require_admin
+def admin_remove_perk():
+    data = request.get_json(silent=True) or {}
+    perk = data.get("perk")
+    if not perk:
+        return jsonify({"error": "missing perk"}), 400
+    try:
+        _PERKS.remove(perk)
+    except ValueError:
+        return jsonify({"error": "perk not found"}), 404
+    _ADMIN_LOGS.append(f"Removed perk {perk}")
     return jsonify({"status": "success", "action": f"Removed perk {perk}"})
 
+# POST /admin/ban-user
 @app.route("/admin/ban-user", methods=["POST"])
-def ban_user():
-    user_id = request.json.get("user_id")
-    # TODO: Ban logic
+@require_admin
+def admin_ban_user():
+    data = request.get_json(silent=True) or {}
+    user_id = data.get("user_id")
+    if not user_id:
+        return jsonify({"error": "missing user_id"}), 400
+    _ADMIN_LOGS.append(f"Banned user {user_id}")
+    # TODO: persist ban in DB
     return jsonify({"status": "success", "action": f"Banned user {user_id}"})
 
+# POST /admin/unban-user
 @app.route("/admin/unban-user", methods=["POST"])
-def unban_user():
-    user_id = request.json.get("user_id")
-    # TODO: Unban logic
+@require_admin
+def admin_unban_user():
+    data = request.get_json(silent=True) or {}
+    user_id = data.get("user_id")
+    if not user_id:
+        return jsonify({"error": "missing user_id"}), 400
+    _ADMIN_LOGS.append(f"Unbanned user {user_id}")
+    # TODO: remove ban in DB
     return jsonify({"status": "success", "action": f"Unbanned user {user_id}"})
 
-@app.route("/admin/users")
-def list_users():
-    # TODO: Fetch user list
-    return jsonify({"users": [{"id": "123", "name": "TestUser"}]})
+# GET /admin/users
+@app.route("/admin/users", methods=["GET"])
+@require_admin
+def admin_list_users():
+    return jsonify({"users": _USERS})
 
-@app.route("/admin/stats")
-def stats():
-    return jsonify({"active_users": 10, "perks_count": 5})
-    
-@app.route("/admin/list-keys")
-def list_keys():
-    return jsonify({"keys": [
-        {"key": "ABC123", "type": "global", "expiry": "2025-12-01", "owner": "User#1234", "status": "active"}
-    ]})
+# GET /admin/stats
+@app.route("/admin/stats", methods=["GET"])
+@require_admin
+def admin_stats():
+    return jsonify({
+        "active_users": len(_USERS),
+        "perks_count": len(_PERKS)
+    })
 
+# GET /admin/list-keys
+@app.route("/admin/list-keys", methods=["GET"])
+@require_admin
+def admin_list_keys():
+    return jsonify({"keys": _KEYS})
+
+# POST /admin/create-key
 @app.route("/admin/create-key", methods=["POST"])
-def create_key():
-    data = request.json
-    # type, custom_key, expiry = data.get(...)
-    # TODO: Implement logic to create key and store owner info
-    return jsonify({"status": "success"})
+@require_admin
+def admin_create_key():
+    data = request.get_json(silent=True) or {}
+    ktype = data.get("type", "one-time")
+    custom = data.get("custom_key")
+    expiry = data.get("expiry")
+    owner = data.get("owner", "unknown")
+    new_key = {
+        "key": custom or f"KEY{len(_KEYS)+1:04d}",
+        "type": ktype,
+        "expiry": expiry or "",
+        "owner": owner,
+        "status": "active"
+    }
+    _KEYS.append(new_key)
+    _KEY_LOGS.append(f"Created key {new_key['key']} for {owner}")
+    return jsonify({"status": "success", "key": new_key})
 
+# POST /admin/revoke-key
 @app.route("/admin/revoke-key", methods=["POST"])
-def revoke_key():
-    key = request.json.get("key")
-    # TODO: Implement revoke logic
-    return jsonify({"status": "revoked"})
+@require_admin
+def admin_revoke_key():
+    data = request.get_json(silent=True) or {}
+    key = data.get("key")
+    if not key:
+        return jsonify({"error": "missing key"}), 400
+    found = next((k for k in _KEYS if k["key"] == key), None)
+    if not found:
+        return jsonify({"error": "not found"}), 404
+    found["status"] = "revoked"
+    _KEY_LOGS.append(f"Revoked key {key}")
+    return jsonify({"status": "revoked", "key": key})
 
-@app.route("/admin/key-logs")
-def key_logs():
-    return jsonify({"logs": ["Created key ABC123 for User#1234", "Revoked key XYZ789"]})
-
+# GET /admin/key-logs
+@app.route("/admin/key-logs", methods=["GET"])
+@require_admin
+def admin_key_logs():
+    return jsonify({"logs": _KEY_LOGS})
 
 @app.route("/portal/me", methods=["GET"])
 def portal_me():
