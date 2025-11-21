@@ -1,27 +1,36 @@
-# app.py  -- Part 1 of 4
+# app.py  -- Part 1 of 4 (reworked, full-featured, drop-in)
 import os
 import uuid
 import json
 import logging
+import re
+import time
+import threading
 from logging.handlers import RotatingFileHandler
+from datetime import datetime, timedelta
 from typing import Optional, Dict, Any
+import importlib
 
-from flask import Flask, request, g, jsonify
+import requests
+from flask import Flask, request, g, jsonify, session, redirect, url_for
 
 # --- Config loader ---------------------------------------------------------
 class Config:
-    """
-    Minimal typed config loader for environment-driven settings.
-    """
     def __init__(self):
         self.ENV = os.getenv("FLASK_ENV", "production")
         self.DEBUG = os.getenv("FLASK_DEBUG", "0") in ("1", "true", "True")
         self.SECRET_KEY = os.getenv("SECRET_KEY", "change-me")
-        self.DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN", "")
+        self.DISCORD_CLIENT_ID = os.getenv("DISCORD_CLIENT_ID", "")
+        self.DISCORD_CLIENT_SECRET = os.getenv("DISCORD_CLIENT_SECRET", "")
+        self.DISCORD_REDIRECT = os.getenv("DISCORD_REDIRECT", "/login/discord/callback")
+        self.DISCORD_API_BASE = os.getenv("DISCORD_API_BASE", "https://discord.com/api")
         self.ADMIN_USER_IDS = self._parse_int_list(os.getenv("ADMIN_USER_IDS", ""))
         self.ALLOW_CUSTOM_KEY = os.getenv("ALLOW_CUSTOM_KEY", "1") in ("1", "true", "True")
         self.LOG_FILE = os.getenv("LOG_FILE", "")
         self.GUNICORN_WORKERS = int(os.getenv("GUNICORN_WORKERS", "2"))
+        # session cookie settings (override from env if necessary)
+        self.SESSION_COOKIE_SAMESITE = os.getenv("SESSION_COOKIE_SAMESITE", "Lax")
+        self.SESSION_COOKIE_SECURE = os.getenv("SESSION_COOKIE_SECURE", "1") in ("1", "true", "True")
 
     @staticmethod
     def _parse_int_list(raw: str):
@@ -34,8 +43,8 @@ def make_logger(name: str = "yt_discord_verifier", logfile: str = "") -> logging
     logger = logging.getLogger(name)
     if logger.handlers:
         return logger
-    logger.setLevel(logging.DEBUG if Config().DEBUG else logging.INFO)
-
+    cfg = Config()
+    logger.setLevel(logging.DEBUG if cfg.DEBUG else logging.INFO)
     fmt = json.dumps({
         "time": "%(asctime)s",
         "level": "%(levelname)s",
@@ -44,27 +53,19 @@ def make_logger(name: str = "yt_discord_verifier", logfile: str = "") -> logging
         "msg": "%(message)s"
     })
     formatter = logging.Formatter(fmt)
-
     stream = logging.StreamHandler()
     stream.setFormatter(formatter)
     logger.addHandler(stream)
-
     if logfile:
         file_handler = RotatingFileHandler(logfile, maxBytes=10_000_000, backupCount=3)
         file_handler.setFormatter(formatter)
         logger.addHandler(file_handler)
-
-    # prevent Flask from adding duplicate handlers
     logger.propagate = False
     return logger
 
 # --- Simple request-id middleware helpers ---------------------------------
 def get_request_id() -> str:
     return getattr(g, "request_id", str(uuid.uuid4()))
-
-def attach_req_id_record(record):
-    record.req_id = get_request_id()
-    return True
 
 # --- Flask factory --------------------------------------------------------
 def create_app(config: Optional[Config] = None) -> Flask:
@@ -73,20 +74,16 @@ def create_app(config: Optional[Config] = None) -> Flask:
     app.config.from_mapping(
         SECRET_KEY=cfg.SECRET_KEY,
         DEBUG=cfg.DEBUG,
-        ENV=cfg.ENV
+        ENV=cfg.ENV,
+        SESSION_COOKIE_SAMESITE=cfg.SESSION_COOKIE_SAMESITE,
+        SESSION_COOKIE_SECURE=cfg.SESSION_COOKIE_SECURE
     )
-
-    # logger
+    # attach cfg and logger
+    app.cfg = cfg
     logger = make_logger(logfile=cfg.LOG_FILE)
-    logging.Logger.addFilter = logging.Logger.addFilter  # defensive no-op binding
-    # attach request id to all log records via filter
-    class ReqIdFilter(logging.Filter):
-        def filter(self, rec):
-            rec.req_id = getattr(g, "request_id", "-")
-            return True
-    logger.addFilter(ReqIdFilter())
+    app.logger_custom = logger
 
-    # request-id before request
+    # request-id and logging
     @app.before_request
     def assign_request_id():
         g.request_id = request.headers.get("X-Request-Id") or str(uuid.uuid4())
@@ -97,9 +94,11 @@ def create_app(config: Optional[Config] = None) -> Flask:
             "remote_addr": request.remote_addr
         }))
 
-    # attach logger to app for convenient access in other parts
-    app.logger_custom = logger
-    app.cfg = cfg
+    class ReqIdFilter(logging.Filter):
+        def filter(self, rec):
+            rec.req_id = getattr(g, "request_id", "-")
+            return True
+    logger.addFilter(ReqIdFilter())
 
     # error handlers
     @app.errorhandler(400)
@@ -116,7 +115,6 @@ def create_app(config: Optional[Config] = None) -> Flask:
 
     @app.errorhandler(Exception)
     def handle_exception(exc):
-        # general exception catcher that returns JSON and logs detailed info
         logger.exception(json.dumps({
             "event": "exception",
             "exception": repr(exc),
@@ -128,14 +126,10 @@ def create_app(config: Optional[Config] = None) -> Flask:
 
     return app
 
-# convenience top-level app for gunicorn
+# module-level app for gunicorn
 app = create_app()
-
 # app.py  -- Part 2 of 4
-import re
-from datetime import datetime, timedelta
-
-# --- Exceptions ------------------------------------------------------------
+# Exceptions and validators
 class ValidationError(Exception):
     def __init__(self, message, errors=None):
         super(ValidationError, self).__init__(message)
@@ -147,7 +141,6 @@ class AuthorizationError(Exception):
 class NotFoundError(Exception):
     pass
 
-# --- Simple validators -----------------------------------------------------
 def _ensure_str(value, name):
     if value is None:
         raise ValidationError(f"{name} is required")
@@ -180,17 +173,7 @@ def _ensure_bool_like(value):
         return value.lower() in ("1", "true", "yes", "y")
     return bool(value)
 
-# Key creation payload validator
 def validate_key_payload(data: dict) -> dict:
-    """
-    Expected keys:
-      - mode: "quick" or "custom" (optional, default "quick")
-      - user_id: string/int identifying the requester
-      - duration_minutes: required for custom mode; integer
-      - role_id: id of the discord role to grant (string)
-      - admin_override: optional bool-like
-    Returns normalized dict or raises ValidationError.
-    """
     if not isinstance(data, dict):
         raise ValidationError("payload must be a JSON object")
     mode = data.get("mode", "quick")
@@ -198,19 +181,15 @@ def validate_key_payload(data: dict) -> dict:
     if mode not in ("quick", "custom"):
         raise ValidationError("mode must be 'quick' or 'custom'")
     user_id_raw = data.get("user_id")
-    user_id = _ensure_str(str(user_id_raw), "user_id")
-
+    user_id = _ensure_str(str(user_id_raw), "user_id") if user_id_raw is not None else ""
     role_id_raw = data.get("role_id")
-    role_id = _ensure_str(str(role_id_raw), "role_id")
-
+    role_id = _ensure_str(str(role_id_raw), "role_id") if role_id_raw is not None else "default_role"
     admin_override = _ensure_bool_like(data.get("admin_override", False))
-
     duration_minutes = None
     if mode == "custom":
         duration_raw = data.get("duration_minutes")
         duration_minutes = _ensure_int(duration_raw, "duration_minutes", minimum=1, maximum=60*24*30)
     elif mode == "quick":
-        # quick mode may optionally accept a duration, but it's ignored by quick generator
         dur = data.get("duration_minutes")
         if dur is not None and dur != "":
             duration_minutes = _ensure_int(dur, "duration_minutes", minimum=1, maximum=60*24*30)
@@ -222,36 +201,20 @@ def validate_key_payload(data: dict) -> dict:
         "duration_minutes": duration_minutes
     }
 
-# Postback payload validator (tolerant)
 def validate_postback_payload(data: dict) -> dict:
-    """
-    Expected keys from external services. Be tolerant:
-      - transaction_id (preferred)
-      - user_id
-      - status
-      - metadata (optional dict)
-    Missing non-critical keys tolerated; validation will coerce types where possible.
-    """
     if not isinstance(data, dict):
         raise ValidationError("postback payload must be a JSON object")
     tx_id = data.get("transaction_id") or data.get("tx") or data.get("id")
     if tx_id is None:
         tx_id = f"tx-{int(datetime.utcnow().timestamp())}"
     tx_id = _ensure_str(str(tx_id), "transaction_id")
-
     user_id_raw = data.get("user_id") or data.get("uid")
-    if user_id_raw is None:
-        user_id = None
-    else:
-        user_id = _ensure_str(str(user_id_raw), "user_id")
-
+    user_id = _ensure_str(str(user_id_raw), "user_id") if user_id_raw is not None else None
     status = data.get("status", "unknown")
     status = _ensure_str(status, "status")
-
     metadata = data.get("metadata") or {}
     if not isinstance(metadata, dict):
         metadata = {"raw": str(metadata)}
-
     return {
         "transaction_id": tx_id,
         "user_id": user_id,
@@ -259,7 +222,7 @@ def validate_postback_payload(data: dict) -> dict:
         "metadata": metadata
     }
 
-# --- Register exception handlers into app created earlier ------------------
+# register exception handlers
 def _register_exception_handlers(app: Flask):
     @app.errorhandler(ValidationError)
     def handle_validation(err):
@@ -276,31 +239,21 @@ def _register_exception_handlers(app: Flask):
         app.logger_custom.warning(json.dumps({"event": "not_found", "message": str(err)}))
         return jsonify({"ok": False, "error": "not_found", "message": str(err)}), 404
 
-# Immediately register handlers if app exists in this module (true when using single-file)
+# attempt register now (app exists)
 try:
     _register_exception_handlers(app)
 except Exception:
-    # create_app not yet run; handlers will be registered when create_app invoked in next part
     pass
 
-# app.py  -- Part 3 of 4 (FINAL, drop-in)
-import threading
-import time
-import re
-import json
-from datetime import datetime
-from typing import Optional
-
-# --- In-memory stores (replace with DB in production) ---------------------
-# thread-safe simple stores for demo and tests
+# --- In-memory stores -----------------------------------------------------
 _store_lock = threading.RLock()
-_KEYS_STORE = {}         # key_id -> key record
-_OVERRIDES_AUDIT = []    # list of override events
+_KEYS_STORE = {}
+_OVERRIDES_AUDIT = []
 
 def _generate_key_id() -> str:
     return f"key_{int(time.time()*1000)}"
-
-# --- Override resolver and audit -----------------------------------------
+# app.py  -- Part 3 of 4
+# Override resolution and key flows
 class Override:
     def __init__(self, resolved_duration: Optional[int], role_id: Optional[str], applied_by_admin: bool):
         self.resolved_duration = resolved_duration
@@ -308,17 +261,8 @@ class Override:
         self.applied_by_admin = applied_by_admin
 
 def resolve_override(app: Flask, requester_id: str, requested_role: str, payload: dict) -> Override:
-    """
-    Determine final override decisions in a single place.
-    Precedence:
-      1. If admin_override True and requester is admin -> honor requested duration
-      2. Else if app.cfg.ALLOW_CUSTOM_KEY is False and mode==custom -> raise ValidationError
-      3. Else use defaults (quick defaults)
-    This function logs the resolution and records an audit event.
-    """
     cfg = app.cfg
     logger = app.logger_custom
-
     mode = payload.get("mode", "quick")
     is_admin = False
     try:
@@ -326,29 +270,21 @@ def resolve_override(app: Flask, requester_id: str, requested_role: str, payload
         is_admin = rid in cfg.ADMIN_USER_IDS
     except Exception:
         is_admin = False
-
     applied_by_admin = False
     resolved_duration = None
-
-    # Case: explicit admin override
     if payload.get("admin_override", False):
         if not is_admin:
             raise AuthorizationError("admin_override requested by non-admin")
         applied_by_admin = True
         if payload.get("duration_minutes"):
             resolved_duration = int(payload["duration_minutes"])
-    # Case: custom mode but custom keys disabled globally
     if mode == "custom" and not cfg.ALLOW_CUSTOM_KEY and not applied_by_admin:
         raise ValidationError("custom keys are disabled by server configuration")
-    # Default durations
     if resolved_duration is None:
         if mode == "quick":
-            resolved_duration = 10  # minutes default for quick keys
+            resolved_duration = 10
         else:
-            # custom mode requested and either provided duration or fallback to 60
             resolved_duration = int(payload.get("duration_minutes") or 60)
-
-    # record audit
     with _store_lock:
         _OVERRIDES_AUDIT.append({
             "timestamp": datetime.utcnow().isoformat(),
@@ -368,11 +304,7 @@ def resolve_override(app: Flask, requester_id: str, requested_role: str, payload
     }))
     return Override(resolved_duration=resolved_duration, role_id=requested_role, applied_by_admin=applied_by_admin)
 
-# --- Key creation flows ---------------------------------------------------
 def _store_key_record(record: dict, key_id: Optional[str] = None) -> dict:
-    """
-    Store the key record. If key_id is provided, ensure no collision; otherwise generate one.
-    """
     with _store_lock:
         if key_id:
             if key_id in _KEYS_STORE:
@@ -385,15 +317,10 @@ def _store_key_record(record: dict, key_id: Optional[str] = None) -> dict:
     return record
 
 def quick_key_create(app: Flask, payload: dict) -> dict:
-    """
-    Create a quick key. This must not be triggered by 'custom' mode.
-    """
     if payload.get("mode") != "quick":
         raise ValidationError("quick_key_create called with non-quick mode")
-    # validate and resolve override
     validated = validate_key_payload(payload)
-    override = resolve_override(app, validated["user_id"], validated["role_id"], validated)
-    # quick generator ignores any requested custom duration unless admin_override applied
+    override = resolve_override(app, validated["user_id"] or "anonymous", validated["role_id"], validated)
     duration = override.resolved_duration
     record = {
         "type": "quick",
@@ -412,24 +339,15 @@ def quick_key_create(app: Flask, payload: dict) -> dict:
     return {"ok": True, "key": stored}
 
 def custom_key_create(app: Flask, payload: dict) -> dict:
-    """
-    Create a custom key. Must not fallback to quick_key_create automatically.
-    Supports optional admin-defined custom_key_string when the requester is an admin.
-    """
     if payload.get("mode") != "custom":
         raise ValidationError("custom_key_create called with non-custom mode")
     validated = validate_key_payload(payload)
-    override = resolve_override(app, validated["user_id"], validated["role_id"], validated)
-    # ensure custom flow uses requested duration (or resolved)
+    override = resolve_override(app, validated["user_id"] or "anonymous", validated["role_id"], validated)
     duration = override.resolved_duration
-
-    # optional custom key string (admins only)
     custom_key = payload.get("custom_key_string")
     if custom_key is not None:
-        # must be applied by admin to allow custom key string
         if not override.applied_by_admin:
             raise AuthorizationError("only admin may set custom key string")
-        # basic validation: allowed chars and length
         if not re.match(r"^[A-Za-z0-9\-_]{4,64}$", custom_key):
             raise ValidationError("custom_key_string invalid format; allowed A-Z a-z 0-9 - _ length 4-64")
         stored = _store_key_record({
@@ -447,7 +365,6 @@ def custom_key_create(app: Flask, payload: dict) -> dict:
             "duration_minutes": duration,
             "applied_by_admin": override.applied_by_admin
         })
-
     app.logger_custom.info(json.dumps({
         "event": "key.created",
         "key_id": stored["key_id"],
@@ -456,7 +373,6 @@ def custom_key_create(app: Flask, payload: dict) -> dict:
     }))
     return {"ok": True, "key": stored}
 
-# Small helpers to inspect store (for admin or tests)
 def list_keys() -> list:
     with _store_lock:
         return list(_KEYS_STORE.values())
@@ -466,9 +382,8 @@ def list_override_audit() -> list:
         return list(_OVERRIDES_AUDIT)
 
 # app.py  -- Part 4 of 4
-from flask import request
+# Routes, Discord OAuth handlers, and health/debug endpoints
 
-# --- Routes ---------------------------------------------------------------
 def _is_admin(app: Flask, user_id: str) -> bool:
     try:
         uid = int(str(user_id))
@@ -478,25 +393,14 @@ def _is_admin(app: Flask, user_id: str) -> bool:
 
 @app.route("/create-key", methods=["POST"])
 def create_key_route():
-    """
-    Creates a key. Expects JSON body validated by validate_key_payload.
-    'mode' must be explicit or defaults to quick. This endpoint dispatches
-    to the correct creation flow and guarantees custom flow never triggers quick flow.
-    """
     payload = request.get_json(silent=True) or {}
-    # normalize mode early
     try:
         normalized = validate_key_payload(payload)
     except ValidationError as e:
         raise
-
-    # ensure explicit mode dispatch
-    mode = normalized["mode"]
-    # attach requester id if missing (try header)
     if not normalized["user_id"]:
         normalized["user_id"] = request.headers.get("X-User-Id") or "anonymous"
-
-    # dispatch
+    mode = normalized["mode"]
     if mode == "quick":
         result = quick_key_create(app, normalized)
     else:
@@ -505,35 +409,24 @@ def create_key_route():
 
 @app.route("/postback", methods=["POST"])
 def postback_route():
-    """
-    Tolerant postback handler: accepts many shapes and never crashes if non-critical fields are missing.
-    Returns 200 and logs the processing. Downstream logic (e.g., awarding roles) should be idempotent.
-    """
     payload = request.get_json(silent=True) or {}
     validated = validate_postback_payload(payload)
     app.logger_custom.info(json.dumps({"event": "postback.received", "tx": validated["transaction_id"], "status": validated["status"]}))
-    # simple mock processing: if status == completed and user present, create a quick key
     try:
         if validated["status"].lower() in ("completed", "success", "ok") and validated["user_id"]:
-            # create a quick key grant as a side-effect
             create_payload = {
                 "mode": "quick",
                 "user_id": validated["user_id"],
                 "role_id": validated["metadata"].get("role_id", "default_role"),
-                # do not allow external postbacks to set admin_override
                 "admin_override": False
             }
             quick_key_create(app, create_payload)
     except Exception as exc:
-        # tolerate processing errors but do not raise 500 to caller
         app.logger_custom.warning(json.dumps({"event": "postback.processing_error", "tx": validated["transaction_id"], "error": repr(exc)}))
     return jsonify({"ok": True, "tx": validated["transaction_id"]}), 200
 
 @app.route("/admin/keys", methods=["GET"])
 def admin_list_keys():
-    """
-    Admin-only inspect endpoint to list keys. Caller must provide X-User-Id header of admin.
-    """
     user_id = request.headers.get("X-User-Id")
     if not _is_admin(app, user_id):
         raise AuthorizationError("not admin")
@@ -546,28 +439,96 @@ def admin_list_overrides():
         raise AuthorizationError("not admin")
     return jsonify({"ok": True, "overrides": list_override_audit()}), 200
 
-# register exception handlers with the app instance if not already registered
-try:
-    _register_exception_handlers(app)
-except Exception:
-    pass
+# --- Discord OAuth2 login flow kept minimal and consistent with frontend expectations
+OAUTH_STATE_KEY = "oauth2_state"
 
-# basic Liveness
+def _build_redirect_uri():
+    base = os.getenv("BASE_URL") or request.url_root.rstrip('/')
+    # allow explicit DISCORD_REDIRECT env to override path
+    path = app.cfg.DISCORD_REDIRECT
+    if path.startswith("http"):
+        return path
+    return base + path
+
+@app.route("/login/discord")
+def login_discord():
+    # start oauth2
+    state = uuid.uuid4().hex
+    session[OAUTH_STATE_KEY] = state
+    params = {
+        "client_id": app.cfg.DISCORD_CLIENT_ID,
+        "redirect_uri": _build_redirect_uri(),
+        "response_type": "code",
+        "scope": "identify email",
+        "state": state,
+        "prompt": "none"
+    }
+    url = f"{app.cfg.DISCORD_API_BASE}/oauth2/authorize?" + "&".join([f"{k}={requests.utils.requote_uri(str(v))}" for k, v in params.items()])
+    return redirect(url)
+
+@app.route("/login/discord/callback")
+def login_discord_callback():
+    error = request.args.get("error")
+    if error:
+        return jsonify({'ok': False, 'error': 'oauth_error', 'message': error}), 400
+    code = request.args.get("code")
+    state = request.args.get("state")
+    saved_state = session.pop(OAUTH_STATE_KEY, None)
+    if not code or not state or saved_state != state:
+        return jsonify({'ok': False, 'error': 'invalid_state', 'message': 'State mismatch or missing code'}), 400
+    token_url = f"{app.cfg.DISCORD_API_BASE}/oauth2/token"
+    data = {
+        'client_id': app.cfg.DISCORD_CLIENT_ID,
+        'client_secret': app.cfg.DISCORD_CLIENT_SECRET,
+        'grant_type': 'authorization_code',
+        'code': code,
+        'redirect_uri': _build_redirect_uri(),
+    }
+    headers = {'Content-Type': 'application/x-www-form-urlencoded'}
+    try:
+        token_resp = requests.post(token_url, data=data, headers=headers, timeout=8)
+        token_resp.raise_for_status()
+        token_json = token_resp.json()
+    except Exception as e:
+        app.logger_custom.exception("Discord token exchange failed")
+        return jsonify({'ok': False, 'error': 'token_exchange_failed', 'message': str(e)}), 502
+    access_token = token_json.get('access_token')
+    if not access_token:
+        return jsonify({'ok': False, 'error': 'no_access_token', 'message': token_json}), 502
+    try:
+        user_resp = requests.get(f"{app.cfg.DISCORD_API_BASE}/users/@me",
+                                 headers={'Authorization': f"Bearer {access_token}"}, timeout=8)
+        user_resp.raise_for_status()
+        user_json = user_resp.json()
+    except Exception as e:
+        app.logger_custom.exception("Discord user fetch failed")
+        return jsonify({'ok': False, 'error': 'user_fetch_failed', 'message': str(e)}), 502
+    # persist minimal user in session
+    user_id = user_json.get('id')
+    username = user_json.get('username')
+    session['user'] = {'id': str(user_id), 'username': username, 'raw': user_json}
+    # redirect to root or configured post-login
+    next_url = session.pop('next', None) or url_for('health_alias')
+    return redirect(next_url)
+
+@app.route("/portal/me", methods=["GET"])
+def portal_me():
+    user = session.get('user')
+    if not user:
+        return jsonify({'ok': False, 'message': 'not authenticated'}), 401
+    return jsonify({'ok': True, 'user': {'id': str(user.get('id')), 'username': user.get('username')}})
+
+# health and debug
 @app.route("/_health", methods=["GET"])
-def health():
+def _health():
     return jsonify({"ok": True, "status": "healthy", "req_id": getattr(g, "request_id", None)}), 200
-# add this near the existing /_health route (Part 4)
+
 @app.route("/health", methods=["GET"])
 def health_alias():
-    """
-    Alias compatible with external health checks that expect /health.
-    Returns quickly and does not block on slow subsystems.
-    """
     return jsonify({"ok": True, "status": "healthy", "req_id": getattr(g, "request_id", None)}), 200
 
 @app.route('/__debug_me')
 def __debug_me():
-    import os
     return jsonify({
         'ok': True,
         'pid': os.getpid(),
@@ -578,6 +539,12 @@ def __debug_me():
             'DISCORD_REDIRECT': bool(os.getenv('DISCORD_REDIRECT'))
         }
     })
+
+# ensure exception handlers registered at module import
+try:
+    _register_exception_handlers(app)
+except Exception:
+    pass
 
 # run for local debug
 if __name__ == "__main__":
