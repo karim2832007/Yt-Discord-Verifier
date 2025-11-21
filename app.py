@@ -443,6 +443,22 @@ def admin_list_overrides():
     if not _is_admin(app, user_id):
         raise AuthorizationError("not admin")
     return jsonify({"ok": True, "overrides": list_override_audit()}), 200
+@app.route("/admin/logs")
+def admin_logs():
+    return jsonify({"logs": ["System started", "Waiting for actions..."]})
+
+@app.route("/admin/add-perk", methods=["POST"])
+def add_perk():
+    data = request.json
+    perk = data.get("perk")
+    # TODO: Add perk logic
+    return jsonify({"status": "success", "action": f"Added perk {perk}"})
+
+@app.route("/admin/remove-perk", methods=["POST"])
+def remove_perk():
+    data = request.json
+    perk = data.get("perk")
+    # TODO: Remove perk logic
 
 @app.route("/admin")
 def admin():
