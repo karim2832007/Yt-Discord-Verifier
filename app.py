@@ -28,10 +28,11 @@ class Config:
         self.ALLOW_CUSTOM_KEY = os.getenv("ALLOW_CUSTOM_KEY", "1") in ("1", "true", "True")
         self.LOG_FILE = os.getenv("LOG_FILE", "")
         self.GUNICORN_WORKERS = int(os.getenv("GUNICORN_WORKERS", "2"))
-        # session cookie settings (override from env if necessary)
-        self.SESSION_COOKIE_SAMESITE = os.getenv("SESSION_COOKIE_SAMESITE", "Lax")
+        
+        # ✅ Session cookie settings
+        self.SESSION_COOKIE_SAMESITE = os.getenv("SESSION_COOKIE_SAMESITE", "None")
         self.SESSION_COOKIE_SECURE = os.getenv("SESSION_COOKIE_SECURE", "1") in ("1", "true", "True")
-
+        self.SESSION_COOKIE_DOMAIN = os.getenv("SESSION_COOKIE_DOMAIN", ".gaming-mods.com")
     @staticmethod
     def _parse_int_list(raw: str):
         if not raw:
@@ -542,6 +543,11 @@ try:
     _register_exception_handlers(app)
 except Exception:
     pass
+
+@app.before_request
+def handle_options():
+    if request.method == 'OPTIONS':
+        return make_response('', 200)
 
 # run for local debug
 if __name__ == "__main__":
