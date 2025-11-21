@@ -85,15 +85,10 @@ def create_app(config: Optional[Config] = None) -> Flask:
     app.logger_custom = logger
 CORS(app, supports_credentials=True, origins=["https://gaming-mods.com"])
     # request-id and logging
-    @app.before_request
-    def assign_request_id():
-        g.request_id = request.headers.get("X-Request-Id") or str(uuid.uuid4())
-        logger.info(json.dumps({
-            "event": "request.start",
-            "method": request.method,
-            "path": request.path,
-            "remote_addr": request.remote_addr
-        }))
+@app.before_request
+def handle_options():
+    if request.method == 'OPTIONS':
+        return make_response('', 200)
 
     class ReqIdFilter(logging.Filter):
         def filter(self, rec):
