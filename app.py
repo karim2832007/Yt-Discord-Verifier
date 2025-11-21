@@ -556,6 +556,14 @@ except Exception:
 @app.route("/_health", methods=["GET"])
 def health():
     return jsonify({"ok": True, "status": "healthy", "req_id": getattr(g, "request_id", None)}), 200
+# add this near the existing /_health route (Part 4)
+@app.route("/health", methods=["GET"])
+def health_alias():
+    """
+    Alias compatible with external health checks that expect /health.
+    Returns quickly and does not block on slow subsystems.
+    """
+    return jsonify({"ok": True, "status": "healthy", "req_id": getattr(g, "request_id", None)}), 200
 
 # run for local debug
 if __name__ == "__main__":
