@@ -618,21 +618,23 @@ def issued_keys_route():
             return jsonify({"ok": False, "message": "Not logged in"}), 401
 
         did = str(user.get("id"))
-        rows = list_keys_for_did(did)  # returns list of rows from DB
+        rows = list_keys_for_did(did)  # returns list of dicts
 
         keys = []
         for row in rows:
+            expires_at = int(row.get("expires_at", 0))
             keys.append({
-                "key": row[0],
-                "expires_at": row[1],
+                "key": row.get("key"),
+                "expires_at": expires_at,
+                "expires_in": max(0, int(expires_at - time.time())),
                 "did": did,
-                "used": row[2] if len(row) > 2 else 0
+                "used": row.get("used", 0)
             })
 
         return jsonify({"ok": True, "keys": keys}), 200
 
-    except Exception:
-        logger.exception("Failed to load issued keys")
+    except Exception as e:
+        logger.exception(f"Failed to load issued keys: {e}")
         return jsonify({"ok": False, "message": "server error"}), 500
 
 
@@ -659,34 +661,40 @@ def generate_custom_key_route():
         # Admin override: OWNER_ID can bypass restrictions
         is_admin = OWNER_ID and str(user.get("id")) == str(OWNER_ID)
 
+        # Parse request body
         data = request.get_json(silent=True) or {}
-        custom_key = data.get("key")
+        custom_key = (data.get("key") or "").strip()
 
-        # Validate custom key length
-        if not custom_key or len(custom_key) < 4:
+        # Validate custom key
+        if not custom_key:
+            return jsonify({"ok": False, "message": "Missing 'key' in request"}), 400
+        if len(custom_key) < 4:
             return jsonify({"ok": False, "message": "Key must be at least 4 chars"}), 400
 
         # Duration handling (default 24h if not provided)
-        if "duration_hours" in data:
-            duration = int(data.get("duration_hours", 24)) * 3600
-        else:
-            duration = int(data.get("duration", 86400))
+        try:
+            if "duration_hours" in data:
+                duration = int(data.get("duration_hours", 24)) * 3600
+            else:
+                duration = int(data.get("duration", 86400))
+        except Exception:
+            duration = 86400  # fallback to 24h
 
         expires_at = time.time() + duration
 
-        # Create the custom key
+        # Create the custom key in DB
         new_key = create_custom_key(custom_key, did, duration)
 
         return jsonify({
             "ok": True,
             "key": new_key,
-            "expires_at": expires_at,
-            "expires_in": int(expires_at - time.time()),
+            "expires_at": int(expires_at),
+            "expires_in": max(0, int(expires_at - time.time())),
             "message": f"Custom key created for {username}{' (admin override)' if is_admin else ''}"
         }), 200
 
-    except Exception:
-        logger.exception(f"Custom key generation failed for user={session.get('user')}")
+    except Exception as e:
+        logger.exception(f"Custom key generation failed for user={session.get('user')}: {e}")
         return jsonify({"ok": False, "message": "server error"}), 500
 
 
