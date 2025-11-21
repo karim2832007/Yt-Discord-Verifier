@@ -395,7 +395,41 @@ def _is_admin(app: Flask, user_id: str) -> bool:
         return uid in app.cfg.ADMIN_USER_IDS
     except Exception:
         return False
+@app.route("/validate_key", methods=["POST"])
+def validate_key():
+    data = request.json
+    key_to_validate = data.get("key")
+    if not key_to_validate:
+        return jsonify({"error": "No key provided"}), 400
 
+    # Replace this with your actual DB lookup
+    key_info = get_key_from_db(key_to_validate)  # Implement this function
+
+    if not key_info:
+        return jsonify({"valid": False, "message": "Key not found"})
+
+    # Check if key is active and not expired
+    expiry_date = key_info.get("expiry")
+    status = key_info.get("status")
+    owner = key_info.get("owner")
+    key_type = key_info.get("type")
+
+    if status == "active":
+        return jsonify({
+            "valid": True,
+            "message": "Key is valid",
+            "owner": owner,
+            "type": key_type,
+            "expiry": expiry_date
+        })
+    else:
+        return jsonify({
+            "valid": False,
+            "message": "Key is revoked or expired",
+            "owner": owner,
+            "type": key_type,
+            "expiry": expiry_date
+        })
 @app.route("/create-key", methods=["POST"])
 def create_key_route():
     payload = request.get_json(silent=True) or {}
@@ -538,6 +572,66 @@ def login_discord_callback():
     # redirect to configured frontend after successful login
     next_url = session.pop('next', None) or "https://gaming-mods.com/"
     return redirect(next_url)
+@app.route("/admin/logs")
+def admin_logs():
+    return jsonify({"logs": ["System started", "Waiting for actions..."]})
+
+@app.route("/admin/add-perk", methods=["POST"])
+def add_perk():
+    perk = request.json.get("perk")
+    # TODO: Add perk logic
+    return jsonify({"status": "success", "action": f"Added perk {perk}"})
+
+@app.route("/admin/remove-perk", methods=["POST"])
+def remove_perk():
+    perk = request.json.get("perk")
+    # TODO: Remove perk logic
+    return jsonify({"status": "success", "action": f"Removed perk {perk}"})
+
+@app.route("/admin/ban-user", methods=["POST"])
+def ban_user():
+    user_id = request.json.get("user_id")
+    # TODO: Ban logic
+    return jsonify({"status": "success", "action": f"Banned user {user_id}"})
+
+@app.route("/admin/unban-user", methods=["POST"])
+def unban_user():
+    user_id = request.json.get("user_id")
+    # TODO: Unban logic
+    return jsonify({"status": "success", "action": f"Unbanned user {user_id}"})
+
+@app.route("/admin/users")
+def list_users():
+    # TODO: Fetch user list
+    return jsonify({"users": [{"id": "123", "name": "TestUser"}]})
+
+@app.route("/admin/stats")
+def stats():
+    return jsonify({"active_users": 10, "perks_count": 5})
+    
+@app.route("/admin/list-keys")
+def list_keys():
+    return jsonify({"keys": [
+        {"key": "ABC123", "type": "global", "expiry": "2025-12-01", "owner": "User#1234", "status": "active"}
+    ]})
+
+@app.route("/admin/create-key", methods=["POST"])
+def create_key():
+    data = request.json
+    # type, custom_key, expiry = data.get(...)
+    # TODO: Implement logic to create key and store owner info
+    return jsonify({"status": "success"})
+
+@app.route("/admin/revoke-key", methods=["POST"])
+def revoke_key():
+    key = request.json.get("key")
+    # TODO: Implement revoke logic
+    return jsonify({"status": "revoked"})
+
+@app.route("/admin/key-logs")
+def key_logs():
+    return jsonify({"logs": ["Created key ABC123 for User#1234", "Revoked key XYZ789"]})
+
 
 @app.route("/portal/me", methods=["GET"])
 def portal_me():
