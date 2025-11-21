@@ -381,7 +381,7 @@ def list_override_audit() -> list:
     with _store_lock:
         return list(_OVERRIDES_AUDIT)
 
-# app.py  -- Part 4 of 4
+# app.py  -- Part 4 replacement
 # Routes, Discord OAuth handlers, and health/debug endpoints
 
 def _is_admin(app: Flask, user_id: str) -> bool:
@@ -396,7 +396,7 @@ def create_key_route():
     payload = request.get_json(silent=True) or {}
     try:
         normalized = validate_key_payload(payload)
-    except ValidationError as e:
+    except ValidationError:
         raise
     if not normalized["user_id"]:
         normalized["user_id"] = request.headers.get("X-User-Id") or "anonymous"
@@ -444,7 +444,6 @@ OAUTH_STATE_KEY = "oauth2_state"
 
 def _build_redirect_uri():
     base = os.getenv("BASE_URL") or request.url_root.rstrip('/')
-    # allow explicit DISCORD_REDIRECT env to override path
     path = app.cfg.DISCORD_REDIRECT
     if path.startswith("http"):
         return path
@@ -452,7 +451,6 @@ def _build_redirect_uri():
 
 @app.route("/login/discord")
 def login_discord():
-    # start oauth2
     state = uuid.uuid4().hex
     session[OAUTH_STATE_KEY] = state
     params = {
@@ -507,8 +505,8 @@ def login_discord_callback():
     user_id = user_json.get('id')
     username = user_json.get('username')
     session['user'] = {'id': str(user_id), 'username': username, 'raw': user_json}
-    # redirect to root or configured post-login
-    next_url = session.pop('next', None) or url_for('health_alias')
+    # redirect to configured frontend after successful login
+    next_url = session.pop('next', None) or "https://gaming-mods.com/"
     return redirect(next_url)
 
 @app.route("/portal/me", methods=["GET"])
