@@ -283,10 +283,12 @@ except Exception:
     # create_app not yet run; handlers will be registered when create_app invoked in next part
     pass
 
-# app.py  -- Part 3 of 4
+# app.py  -- Part 3 of 4 (FINAL, drop-in)
 import threading
 import time
-from datetime import datetime, timedelta
+import re
+import json
+from datetime import datetime
 from typing import Optional
 
 # --- In-memory stores (replace with DB in production) ---------------------
@@ -357,16 +359,29 @@ def resolve_override(app: Flask, requester_id: str, requested_role: str, payload
             "applied_by_admin": applied_by_admin,
             "resolved_duration": resolved_duration
         })
-    logger.info(json.dumps({"event": "override.resolved", "requester_id": requester_id, "role": requested_role, "duration": resolved_duration, "admin": applied_by_admin}))
+    logger.info(json.dumps({
+        "event": "override.resolved",
+        "requester_id": requester_id,
+        "role": requested_role,
+        "duration": resolved_duration,
+        "admin": applied_by_admin
+    }))
     return Override(resolved_duration=resolved_duration, role_id=requested_role, applied_by_admin=applied_by_admin)
 
 # --- Key creation flows ---------------------------------------------------
-def _store_key_record(record: dict) -> dict:
+def _store_key_record(record: dict, key_id: Optional[str] = None) -> dict:
+    """
+    Store the key record. If key_id is provided, ensure no collision; otherwise generate one.
+    """
     with _store_lock:
-        key_id = _generate_key_id()
-        record["key_id"] = key_id
+        if key_id:
+            if key_id in _KEYS_STORE:
+                raise ValidationError("custom key string already exists")
+            record["key_id"] = key_id
+        else:
+            record["key_id"] = _generate_key_id()
         record["created_at"] = datetime.utcnow().isoformat()
-        _KEYS_STORE[key_id] = record
+        _KEYS_STORE[record["key_id"]] = record
     return record
 
 def quick_key_create(app: Flask, payload: dict) -> dict:
@@ -388,12 +403,18 @@ def quick_key_create(app: Flask, payload: dict) -> dict:
         "applied_by_admin": override.applied_by_admin
     }
     stored = _store_key_record(record)
-    app.logger_custom.info(json.dumps({"event": "key.created", "key_id": stored["key_id"], "type": "quick", "user_id": stored["user_id"]}))
+    app.logger_custom.info(json.dumps({
+        "event": "key.created",
+        "key_id": stored["key_id"],
+        "type": "quick",
+        "user_id": stored["user_id"]
+    }))
     return {"ok": True, "key": stored}
 
 def custom_key_create(app: Flask, payload: dict) -> dict:
     """
     Create a custom key. Must not fallback to quick_key_create automatically.
+    Supports optional admin-defined custom_key_string when the requester is an admin.
     """
     if payload.get("mode") != "custom":
         raise ValidationError("custom_key_create called with non-custom mode")
@@ -401,15 +422,38 @@ def custom_key_create(app: Flask, payload: dict) -> dict:
     override = resolve_override(app, validated["user_id"], validated["role_id"], validated)
     # ensure custom flow uses requested duration (or resolved)
     duration = override.resolved_duration
-    record = {
+
+    # optional custom key string (admins only)
+    custom_key = payload.get("custom_key_string")
+    if custom_key is not None:
+        # must be applied by admin to allow custom key string
+        if not override.applied_by_admin:
+            raise AuthorizationError("only admin may set custom key string")
+        # basic validation: allowed chars and length
+        if not re.match(r"^[A-Za-z0-9\-_]{4,64}$", custom_key):
+            raise ValidationError("custom_key_string invalid format; allowed A-Z a-z 0-9 - _ length 4-64")
+        stored = _store_key_record({
+            "type": "custom",
+            "user_id": validated["user_id"],
+            "role_id": override.role_id,
+            "duration_minutes": duration,
+            "applied_by_admin": override.applied_by_admin
+        }, key_id=custom_key)
+    else:
+        stored = _store_key_record({
+            "type": "custom",
+            "user_id": validated["user_id"],
+            "role_id": override.role_id,
+            "duration_minutes": duration,
+            "applied_by_admin": override.applied_by_admin
+        })
+
+    app.logger_custom.info(json.dumps({
+        "event": "key.created",
+        "key_id": stored["key_id"],
         "type": "custom",
-        "user_id": validated["user_id"],
-        "role_id": override.role_id,
-        "duration_minutes": duration,
-        "applied_by_admin": override.applied_by_admin
-    }
-    stored = _store_key_record(record)
-    app.logger_custom.info(json.dumps({"event": "key.created", "key_id": stored["key_id"], "type": "custom", "user_id": stored["user_id"]}))
+        "user_id": stored["user_id"]
+    }))
     return {"ok": True, "key": stored}
 
 # Small helpers to inspect store (for admin or tests)
