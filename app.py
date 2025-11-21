@@ -444,6 +444,16 @@ def admin_list_overrides():
         raise AuthorizationError("not admin")
     return jsonify({"ok": True, "overrides": list_override_audit()}), 200
 
+@app.route("/admin")
+def admin():
+    return render_template("admin.html")
+
+@app.route("/keys")
+def keys():
+    return jsonify({
+        "DISCORD_CLIENT_ID": app.cfg.DISCORD_CLIENT_ID,
+        "DISCORD_REDIRECT": app.cfg.DISCORD_REDIRECT
+    })
 # --- Discord OAuth2 login flow kept minimal and consistent with frontend expectations
 OAUTH_STATE_KEY = "oauth2_state"
 
