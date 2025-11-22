@@ -535,8 +535,10 @@ def admin_list_overrides():
 def admin():
     return render_template("admin.html")
 
+
 @app.route("/keys", methods=["GET"])
 def keys():
+    """Return all keys for the logged-in user as JSON."""
     try:
         user = session.get("user")
         if not user:
@@ -584,11 +586,7 @@ def keys():
         return jsonify({
             "ok": True,
             "user_id": user_id,
-            "keys": formatted,
-            "frontend": {
-                "generate_url": url_for("keys_generate", _external=False),
-                "burn_url": url_for("keys_burn", _external=False)
-            }
+            "keys": formatted
         }), 200
 
     except Exception as e:
