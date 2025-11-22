@@ -504,6 +504,31 @@ def validate_key():
         "expires_at": expiry_date  # duplicate for clients expecting different field names
     }), 200
 
+@app.route("/keys/burn", methods=["POST"])
+def keys_burn():
+    """Public: burn (revoke) a key by ID."""
+    data = request.get_json(silent=True) or {}
+    key_to_burn = data.get("key")
+    if not key_to_burn:
+        return jsonify({"ok": False, "message": "No key provided"}), 400
+
+    with _store_lock:
+        key_info = _KEYS_STORE.get(key_to_burn)
+        if not key_info:
+            return jsonify({"ok": False, "message": "Key not found"}), 404
+
+        # Mark as revoked
+        key_info["status"] = "revoked"
+        _KEYS_STORE[key_to_burn] = key_info
+
+    app.logger_custom.info(json.dumps({
+        "event": "key.burned",
+        "key_id": key_to_burn,
+        "user_id": key_info.get("user_id")
+    }))
+
+    return jsonify({"ok": True, "message": f"Key {key_to_burn} burned"}), 200
+
 @app.route("/create-key", methods=["POST"])
 def create_key_route():
     """Public: create a key. Returns JSON for API clients, redirect for browser flows."""
