@@ -30,9 +30,11 @@ class Config:
         self.GUNICORN_WORKERS = int(os.getenv("GUNICORN_WORKERS", "2"))
         
         # ✅ Session cookie settings
-        self.SESSION_COOKIE_SAMESITE = os.getenv("SESSION_COOKIE_SAMESITE", "None")
-        self.SESSION_COOKIE_SECURE = os.getenv("SESSION_COOKIE_SECURE", "1") in ("1", "true", "True")
-        self.SESSION_COOKIE_DOMAIN = os.getenv("SESSION_COOKIE_DOMAIN", ".gaming-mods.com")
+self.SESSION_COOKIE_NAME = os.getenv("SESSION_COOKIE_NAME", "gamingmods_session")
+self.SESSION_COOKIE_SAMESITE = os.getenv("SESSION_COOKIE_SAMESITE", "Lax")
+self.SESSION_COOKIE_SECURE = str(os.getenv("SESSION_COOKIE_SECURE", "1")).lower() in ("1", "true", "yes")
+self.SESSION_COOKIE_DOMAIN = os.getenv("SESSION_COOKIE_DOMAIN", ".gaming-mods.com")  # ensures sharing across subdomains
+self.SESSION_COOKIE_HTTPONLY = True
     @staticmethod
     def _parse_int_list(raw: str):
         if not raw:
