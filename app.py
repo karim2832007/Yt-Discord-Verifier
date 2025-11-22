@@ -463,15 +463,19 @@ def validate_key():
 
 @app.route("/create-key", methods=["POST"])
 def create_key_route():
-    """Public: create a key, then redirect user to /keys to view."""
+    """Public: create a key. Returns JSON for API clients, redirect for browser flows."""
     payload = request.get_json(silent=True) or {}
     try:
         normalized = validate_key_payload(payload)
     except ValidationError as e:
-        return jsonify({"error": str(e)}), 400
+        return jsonify({"ok": False, "error": str(e)}), 400
 
+    # Prefer the logged-in session user ID
     if not normalized.get("user_id"):
-        normalized["user_id"] = request.headers.get("X-User-Id") or "anonymous"
+        if "user" in session and session["user"].get("id"):
+            normalized["user_id"] = str(session["user"]["id"])
+        else:
+            normalized["user_id"] = request.headers.get("X-User-Id") or "anonymous"
 
     mode = normalized.get("mode", "quick")
     if mode == "quick":
@@ -479,18 +483,20 @@ def create_key_route():
     else:
         new_key = custom_key_create(app, normalized)
 
-    # If the client expects JSON (AJAX), return JSON; otherwise fall back to redirect for browser flows
+    # Decide whether to return JSON or redirect
     wants_json = (
         request.is_json
         or request.headers.get("X-Requested-With") == "XMLHttpRequest"
-        or "application/json" in request.headers.get("Accept", "")
+        or "application/json" in (request.headers.get("Accept") or "")
     )
 
     if wants_json:
-        # return the created key (adapt field names to what quick_key_create returns)
-        return jsonify({"ok": True, "key": new_key}), 200
+        return jsonify({
+            "ok": True,
+            "key": new_key,
+            "user_id": normalized["user_id"]
+        }), 200
 
-    # After creation, send the user to the keys route (existing browser flow)
     return redirect("/keys")
 
 
