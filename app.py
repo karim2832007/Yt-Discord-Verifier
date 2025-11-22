@@ -524,8 +524,6 @@ def keys():
             return jsonify({"ok": False, "message": "Not authenticated"}), 401
 
         user_id = str(user.get("id"))
-
-        # Safely filter keys for this user
         with _store_lock:
             user_keys = [
                 k for k in _KEYS_STORE.values()
@@ -542,8 +540,8 @@ def keys():
                 try:
                     dt_expiry = datetime.fromisoformat(expiry_date)
                     expired = datetime.utcnow() > dt_expiry
-                except Exception:
-                    # Defensive fallback: treat invalid expiry as non-expired
+                except Exception as e:
+                    app.logger.warning(f"Expiry parse failed: {expiry_date} ({e})")
                     expired = False
 
             valid = (status == "active" and not expired)
@@ -560,7 +558,7 @@ def keys():
                 "message": "Key is valid" if valid else "Key is revoked or expired",
                 "actions": {
                     "copy_hint": f"POST /validate_key {{'key':'{k.get('key_id')}'}}",
-                    "burn_hint": "POST /keys/burn {{'key':'{k.get('key_id')}'}}"
+                    "burn_hint": f"POST /keys/burn {{'key':'{k.get('key_id')}'}}"
                 }
             })
 
@@ -575,7 +573,7 @@ def keys():
         }), 200
 
     except Exception as e:
-        app.logger.exception("Failed to list keys")
+        app.logger.exception(f"Failed to list keys: {e}")
         return jsonify({"ok": False, "message": "Server error"}), 500
 
 # --- Discord OAuth2 login flow kept minimal and consistent with frontend expectations
