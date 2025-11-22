@@ -10,7 +10,7 @@ from logging.handlers import RotatingFileHandler
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any
 import importlib
-
+import string, secrets
 import requests
 from flask import Flask, request, g, jsonify, session, redirect, url_for, make_response
 from flask_cors import CORS
@@ -341,36 +341,57 @@ def _store_key_record(record: dict, key_id: Optional[str] = None) -> dict:
         _KEYS_STORE[record["key_id"]] = record
         return _KEYS_STORE[record["key_id"]]
 
+
+
+def generate_random_key(length=10) -> str:
+    """Generate a random alphanumeric key string of given length."""
+    alphabet = string.ascii_letters + string.digits
+    return ''.join(secrets.choice(alphabet) for _ in range(length))
+
 def quick_key_create(app: Flask, payload: dict) -> dict:
     """Internal helper: create a quick key (not a public route)."""
     if payload.get("mode") != "quick":
         raise ValidationError("quick_key_create called with non-quick mode")
 
     validated = validate_key_payload(payload)
-    override = resolve_override(app, validated["user_id"] or "anonymous", validated["role_id"], validated)
+    override = resolve_override(app, validated["user_id"] or "anonymous",
+                                validated["role_id"], validated)
     duration = override.resolved_duration
 
+    # Build the record
     record = {
         "type": "quick",
         "user_id": validated["user_id"],
         "role_id": override.role_id,
         "duration_minutes": duration,
         "applied_by_admin": override.applied_by_admin,
-        # optional: caller may pass "expiry" (ISO 8601 string); we keep it if present
     }
+
+    # Add expiry: use provided one or default to 24h
     if "expiry" in validated:
         record["expiry"] = validated["expiry"]
+    else:
+        record["expiry"] = (datetime.utcnow() + timedelta(hours=24)).isoformat()
 
-    stored = _store_key_record(record)
+    # Generate a random 10-character key string
+    key_id = generate_random_key(10)
+    record["key_id"] = key_id
+    record["created_at"] = datetime.utcnow().isoformat()
+    record["status"] = "active"
+
+    # Store in memory
+    with _store_lock:
+        _KEYS_STORE[key_id] = record
 
     app.logger_custom.info(json.dumps({
         "event": "key.created",
-        "key_id": stored["key_id"],
+        "key_id": key_id,
         "type": "quick",
-        "user_id": stored["user_id"]
+        "user_id": record["user_id"]
     }))
-    return {"ok": True, "key": stored}
 
+    return {"ok": True, "key": record}
+    
 def custom_key_create(app: Flask, payload: dict) -> dict:
     """Internal helper: create a custom key (not a public route)."""
     if payload.get("mode") != "custom":
@@ -430,19 +451,38 @@ def _get_key_from_store(key_id: str) -> Optional[dict]:
     with _store_lock:
         return _KEYS_STORE.get(key_id)
 
-@app.route("/validate_key", methods=["POST"])
+@app.route("/validate_key", methods=["GET", "POST"])
 def validate_key():
-    """Public: validate a key and return full record + validity state."""
-    data = request.get_json(silent=True) or {}
-    key_to_validate = data.get("key")
+    """Public: validate a key and return full record + validity state.
+    Supports both POST {key: "..."} and GET /validate_key/<key>.
+    """
+
+    key_to_validate = None
+
+    # Handle POST JSON body
+    if request.method == "POST":
+        data = request.get_json(silent=True) or {}
+        key_to_validate = data.get("key")
+
+    # Handle GET with ?key=... or /validate_key/<key>
+    if request.method == "GET":
+        # First check query string (?key=...)
+        key_to_validate = key_to_validate or request.args.get("key")
+        # Then check path segment (/validate_key/<key>)
+        if not key_to_validate:
+            # Strip leading slash segments
+            path_parts = request.path.rstrip("/").split("/")
+            if len(path_parts) > 1 and path_parts[-1] != "validate_key":
+                key_to_validate = path_parts[-1]
+
     if not key_to_validate:
-        return jsonify({"error": "No key provided"}), 400
+        return jsonify({"ok": False, "valid": False, "message": "No key provided"}), 400
 
     key_info = _get_key_from_store(key_to_validate)
     if not key_info:
-        return jsonify({"valid": False, "message": "Key not found"}), 404
+        return jsonify({"ok": False, "valid": False, "message": "Key not found"}), 404
 
-    # compute validity: active status and optional expiry check
+    # Compute validity: active status and optional expiry check
     status = key_info.get("status", "active")
     expiry_date = key_info.get("expiry")
     expired = False
@@ -451,14 +491,17 @@ def validate_key():
             dt_expiry = datetime.fromisoformat(expiry_date)
             expired = datetime.utcnow() > dt_expiry
         except Exception:
-            # if bad format, treat as not expired and include raw value
             expired = False
 
     valid = (status == "active" and not expired)
+
     return jsonify({
+        "ok": True,
         "valid": valid,
         "message": "Key is valid" if valid else "Key is revoked or expired",
-        "key": key_info
+        "key": key_info,
+        "expiry": expiry_date,
+        "expires_at": expiry_date  # duplicate for clients expecting different field names
     }), 200
 
 @app.route("/create-key", methods=["POST"])
@@ -482,6 +525,10 @@ def create_key_route():
         new_key = quick_key_create(app, normalized)
     else:
         new_key = custom_key_create(app, normalized)
+
+    # Ensure expiry is set (default 24h from now)
+    if isinstance(new_key, dict) and not new_key.get("expiry"):
+        new_key["expiry"] = (datetime.utcnow() + timedelta(hours=24)).isoformat()
 
     # Decide whether to return JSON or redirect
     wants_json = (
