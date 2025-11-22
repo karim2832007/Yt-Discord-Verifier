@@ -475,12 +475,28 @@ def create_key_route():
 
     mode = normalized.get("mode", "quick")
     if mode == "quick":
-        _ = quick_key_create(app, normalized)
+        new_key = quick_key_create(app, normalized)
     else:
-        _ = custom_key_create(app, normalized)
+        new_key = custom_key_create(app, normalized)
 
-    # After creation, send the user to the keys route (frontend can display list/details there)
+    # If the client expects JSON (AJAX), return JSON; otherwise fall back to redirect for browser flows
+    wants_json = (
+        request.is_json
+        or request.headers.get("X-Requested-With") == "XMLHttpRequest"
+        or "application/json" in request.headers.get("Accept", "")
+    )
+
+    if wants_json:
+        # return the created key (adapt field names to what quick_key_create returns)
+        return jsonify({"ok": True, "key": new_key}), 200
+
+    # After creation, send the user to the keys route (existing browser flow)
     return redirect("/keys")
+
+
+@app.route("/generate_key", methods=["POST"])
+def generate_key_alias():
+    return create_key_route()
 
 @app.route("/postback", methods=["POST"])
 def postback_route():
