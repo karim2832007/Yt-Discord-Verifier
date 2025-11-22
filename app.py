@@ -518,53 +518,65 @@ def admin():
 
 @app.route("/keys", methods=["GET"])
 def keys():
-    user = session.get("user")
-    if not user:
-        return jsonify({"ok": False, "message": "Not authenticated"}), 401
+    try:
+        user = session.get("user")
+        if not user:
+            return jsonify({"ok": False, "message": "Not authenticated"}), 401
 
-    user_id = str(user.get("id"))
-    with _store_lock:
-        user_keys = [k for k in _KEYS_STORE.values() if str(k.get("user_id")) == user_id]
+        user_id = str(user.get("id"))
 
-    formatted = []
-    for k in user_keys:
-        # validity check (same logic as validate_key)
-        status = k.get("status", "active")
-        expiry_date = k.get("expiry")
-        expired = False
-        if expiry_date:
-            try:
-                dt_expiry = datetime.fromisoformat(expiry_date)
-                expired = datetime.utcnow() > dt_expiry
-            except Exception:
-                expired = False
-        valid = (status == "active" and not expired)
+        # Safely filter keys for this user
+        with _store_lock:
+            user_keys = [
+                k for k in _KEYS_STORE.values()
+                if str(k.get("user_id")) == user_id
+            ]
 
-        formatted.append({
-            "key_id": k.get("key_id"),
-            "type": k.get("type"),
-            "owner": k.get("user_id"),
-            "role_id": k.get("role_id"),
-            "created_at": k.get("created_at"),
-            "expiry": expiry_date,
-            "status": status,
-            "valid": valid,
-            "message": "Key is valid" if valid else "Key is revoked or expired",
-            "actions": {
-                "copy_hint": f"POST /validate_key {{'key':'{k.get('key_id')}'}}",
-                "burn_hint": "POST /keys/burn { 'key':'<key_id>' }"
+        formatted = []
+        for k in user_keys:
+            status = k.get("status", "active")
+            expiry_date = k.get("expiry")
+            expired = False
+
+            if expiry_date:
+                try:
+                    dt_expiry = datetime.fromisoformat(expiry_date)
+                    expired = datetime.utcnow() > dt_expiry
+                except Exception:
+                    # Defensive fallback: treat invalid expiry as non-expired
+                    expired = False
+
+            valid = (status == "active" and not expired)
+
+            formatted.append({
+                "key_id": k.get("key_id"),
+                "type": k.get("type"),
+                "owner": k.get("user_id"),
+                "role_id": k.get("role_id"),
+                "created_at": k.get("created_at"),
+                "expiry": expiry_date,
+                "status": status,
+                "valid": valid,
+                "message": "Key is valid" if valid else "Key is revoked or expired",
+                "actions": {
+                    "copy_hint": f"POST /validate_key {{'key':'{k.get('key_id')}'}}",
+                    "burn_hint": "POST /keys/burn {{'key':'{k.get('key_id')}'}}"
+                }
+            })
+
+        return jsonify({
+            "ok": True,
+            "user_id": user_id,
+            "keys": formatted,
+            "frontend": {
+                "generate_url": url_for("keys_generate", _external=False),
+                "burn_url": url_for("keys_burn", _external=False)
             }
-        })
+        }), 200
 
-    return jsonify({
-        "ok": True,
-        "user_id": user_id,
-        "keys": formatted,
-        "frontend": {
-            "generate_url": url_for("keys_generate", _external=False),
-            "burn_url": url_for("keys_burn", _external=False)
-        }
-    }), 200
+    except Exception as e:
+        app.logger.exception("Failed to list keys")
+        return jsonify({"ok": False, "message": "Server error"}), 500
 
 # --- Discord OAuth2 login flow kept minimal and consistent with frontend expectations
 OAUTH_STATE_KEY = "oauth2_state"
