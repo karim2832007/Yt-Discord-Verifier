@@ -252,11 +252,12 @@ except Exception:
 
 # --- In-memory stores -----------------------------------------------------
 _store_lock = threading.RLock()
-_KEYS_STORE = {}
-_OVERRIDES_AUDIT = []
+_KEYS_STORE = {}          # key_id -> record
+_OVERRIDES_AUDIT = []     # audit entries
 
 def _generate_key_id() -> str:
     return f"key_{int(time.time()*1000)}"
+
 # app.py  -- Part 3 of 4
 # Override resolution and key flows
 class Override:
@@ -269,27 +270,38 @@ def resolve_override(app: Flask, requester_id: str, requested_role: str, payload
     cfg = app.cfg
     logger = app.logger_custom
     mode = payload.get("mode", "quick")
+
+    # admin detection
     is_admin = False
     try:
         rid = int(str(requester_id))
         is_admin = rid in cfg.ADMIN_USER_IDS
     except Exception:
         is_admin = False
+
     applied_by_admin = False
     resolved_duration = None
+
+    # admin override path
     if payload.get("admin_override", False):
         if not is_admin:
             raise AuthorizationError("admin_override requested by non-admin")
         applied_by_admin = True
         if payload.get("duration_minutes"):
             resolved_duration = int(payload["duration_minutes"])
+
+    # custom mode gating
     if mode == "custom" and not cfg.ALLOW_CUSTOM_KEY and not applied_by_admin:
         raise ValidationError("custom keys are disabled by server configuration")
+
+    # default duration resolution
     if resolved_duration is None:
         if mode == "quick":
             resolved_duration = 10
         else:
             resolved_duration = int(payload.get("duration_minutes") or 60)
+
+    # audit
     with _store_lock:
         _OVERRIDES_AUDIT.append({
             "timestamp": datetime.utcnow().isoformat(),
@@ -300,6 +312,7 @@ def resolve_override(app: Flask, requester_id: str, requested_role: str, payload
             "applied_by_admin": applied_by_admin,
             "resolved_duration": resolved_duration
         })
+
     logger.info(json.dumps({
         "event": "override.resolved",
         "requester_id": requester_id,
@@ -310,6 +323,7 @@ def resolve_override(app: Flask, requester_id: str, requested_role: str, payload
     return Override(resolved_duration=resolved_duration, role_id=requested_role, applied_by_admin=applied_by_admin)
 
 def _store_key_record(record: dict, key_id: Optional[str] = None) -> dict:
+    """Persist a key record into the in-memory store with thread-safety."""
     with _store_lock:
         if key_id:
             if key_id in _KEYS_STORE:
@@ -317,24 +331,35 @@ def _store_key_record(record: dict, key_id: Optional[str] = None) -> dict:
             record["key_id"] = key_id
         else:
             record["key_id"] = _generate_key_id()
+
+        # optional expiry passthrough: if caller provided ISO expiry, retain it
+        record.setdefault("status", "active")
         record["created_at"] = datetime.utcnow().isoformat()
         _KEYS_STORE[record["key_id"]] = record
-    return record
+        return _KEYS_STORE[record["key_id"]]
 
 def quick_key_create(app: Flask, payload: dict) -> dict:
+    """Internal helper: create a quick key (not a public route)."""
     if payload.get("mode") != "quick":
         raise ValidationError("quick_key_create called with non-quick mode")
+
     validated = validate_key_payload(payload)
     override = resolve_override(app, validated["user_id"] or "anonymous", validated["role_id"], validated)
     duration = override.resolved_duration
+
     record = {
         "type": "quick",
         "user_id": validated["user_id"],
         "role_id": override.role_id,
         "duration_minutes": duration,
-        "applied_by_admin": override.applied_by_admin
+        "applied_by_admin": override.applied_by_admin,
+        # optional: caller may pass "expiry" (ISO 8601 string); we keep it if present
     }
+    if "expiry" in validated:
+        record["expiry"] = validated["expiry"]
+
     stored = _store_key_record(record)
+
     app.logger_custom.info(json.dumps({
         "event": "key.created",
         "key_id": stored["key_id"],
@@ -344,32 +369,34 @@ def quick_key_create(app: Flask, payload: dict) -> dict:
     return {"ok": True, "key": stored}
 
 def custom_key_create(app: Flask, payload: dict) -> dict:
+    """Internal helper: create a custom key (not a public route)."""
     if payload.get("mode") != "custom":
         raise ValidationError("custom_key_create called with non-custom mode")
+
     validated = validate_key_payload(payload)
     override = resolve_override(app, validated["user_id"] or "anonymous", validated["role_id"], validated)
     duration = override.resolved_duration
     custom_key = payload.get("custom_key_string")
+
+    base_record = {
+        "type": "custom",
+        "user_id": validated["user_id"],
+        "role_id": override.role_id,
+        "duration_minutes": duration,
+        "applied_by_admin": override.applied_by_admin,
+    }
+    if "expiry" in validated:
+        base_record["expiry"] = validated["expiry"]
+
     if custom_key is not None:
         if not override.applied_by_admin:
             raise AuthorizationError("only admin may set custom key string")
         if not re.match(r"^[A-Za-z0-9\-_]{4,64}$", custom_key):
             raise ValidationError("custom_key_string invalid format; allowed A-Z a-z 0-9 - _ length 4-64")
-        stored = _store_key_record({
-            "type": "custom",
-            "user_id": validated["user_id"],
-            "role_id": override.role_id,
-            "duration_minutes": duration,
-            "applied_by_admin": override.applied_by_admin
-        }, key_id=custom_key)
+        stored = _store_key_record(base_record, key_id=custom_key)
     else:
-        stored = _store_key_record({
-            "type": "custom",
-            "user_id": validated["user_id"],
-            "role_id": override.role_id,
-            "duration_minutes": duration,
-            "applied_by_admin": override.applied_by_admin
-        })
+        stored = _store_key_record(base_record)
+
     app.logger_custom.info(json.dumps({
         "event": "key.created",
         "key_id": stored["key_id"],
@@ -395,59 +422,66 @@ def _is_admin(app: Flask, user_id: str) -> bool:
         return uid in app.cfg.ADMIN_USER_IDS
     except Exception:
         return False
+
+def _get_key_from_store(key_id: str) -> Optional[dict]:
+    with _store_lock:
+        return _KEYS_STORE.get(key_id)
+
 @app.route("/validate_key", methods=["POST"])
 def validate_key():
-    data = request.json
+    """Public: validate a key and return full record + validity state."""
+    data = request.get_json(silent=True) or {}
     key_to_validate = data.get("key")
     if not key_to_validate:
         return jsonify({"error": "No key provided"}), 400
 
-    # Replace this with your actual DB lookup
-    key_info = get_key_from_db(key_to_validate)  # Implement this function
-
+    key_info = _get_key_from_store(key_to_validate)
     if not key_info:
-        return jsonify({"valid": False, "message": "Key not found"})
+        return jsonify({"valid": False, "message": "Key not found"}), 404
 
-    # Check if key is active and not expired
+    # compute validity: active status and optional expiry check
+    status = key_info.get("status", "active")
     expiry_date = key_info.get("expiry")
-    status = key_info.get("status")
-    owner = key_info.get("owner")
-    key_type = key_info.get("type")
+    expired = False
+    if expiry_date:
+        try:
+            dt_expiry = datetime.fromisoformat(expiry_date)
+            expired = datetime.utcnow() > dt_expiry
+        except Exception:
+            # if bad format, treat as not expired and include raw value
+            expired = False
 
-    if status == "active":
-        return jsonify({
-            "valid": True,
-            "message": "Key is valid",
-            "owner": owner,
-            "type": key_type,
-            "expiry": expiry_date
-        })
-    else:
-        return jsonify({
-            "valid": False,
-            "message": "Key is revoked or expired",
-            "owner": owner,
-            "type": key_type,
-            "expiry": expiry_date
-        })
+    valid = (status == "active" and not expired)
+    return jsonify({
+        "valid": valid,
+        "message": "Key is valid" if valid else "Key is revoked or expired",
+        "key": key_info
+    }), 200
+
 @app.route("/create-key", methods=["POST"])
 def create_key_route():
+    """Public: create a key, then redirect user to /keys to view."""
     payload = request.get_json(silent=True) or {}
     try:
         normalized = validate_key_payload(payload)
-    except ValidationError:
-        raise
-    if not normalized["user_id"]:
+    except ValidationError as e:
+        return jsonify({"error": str(e)}), 400
+
+    if not normalized.get("user_id"):
         normalized["user_id"] = request.headers.get("X-User-Id") or "anonymous"
-    mode = normalized["mode"]
+
+    mode = normalized.get("mode", "quick")
     if mode == "quick":
-        result = quick_key_create(app, normalized)
+        _ = quick_key_create(app, normalized)
     else:
-        result = custom_key_create(app, normalized)
-    return jsonify(result), 200
+        _ = custom_key_create(app, normalized)
+
+    # After creation, send the user to the keys route (frontend can display list/details there)
+    return redirect("/keys")
 
 @app.route("/postback", methods=["POST"])
 def postback_route():
+    """Webhook: on completed transaction, auto-create a quick key for the user."""
     payload = request.get_json(silent=True) or {}
     validated = validate_postback_payload(payload)
     app.logger_custom.info(json.dumps({"event": "postback.received", "tx": validated["transaction_id"], "status": validated["status"]}))
