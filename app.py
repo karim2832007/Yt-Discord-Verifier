@@ -652,12 +652,6 @@ def admin_stats():
         "perks_count": len(_PERKS)
     })
 
-# GET /admin/list-keys
-@app.route("/admin/list-keys", methods=["GET"])
-@require_admin
-def admin_list_keys():
-    return jsonify({"keys": _KEYS})
-
 # POST /admin/create-key
 @app.route("/admin/create-key", methods=["POST"])
 @require_admin
