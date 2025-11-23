@@ -460,13 +460,7 @@ def _get_key_from_store(key_id: str) -> Optional[dict]:
 def validate_key(key_to_validate=None, did=None):
     """
     Validate a key and return requested fields.
-    Supports:
-      - POST { "key": "..." }
-      - GET /validate_key?key=...&fields=valid,message
-      - GET /validate_key/<key>?fields=expires_at
-      - GET /validate_key/<did>/<key>
-    Legacy mode:
-      - GET /validate_key/<key>?legacy=1 → returns only {ok, valid, message}
+    Legacy mode: always returns ok, valid, message for Ren'Py client.
     """
 
     try:
@@ -482,7 +476,11 @@ def validate_key(key_to_validate=None, did=None):
         if not key_to_validate:
             return jsonify({"ok": False, "valid": False, "message": "No key provided"}), 400
 
-        key_to_validate = unquote_plus(str(key_to_validate)).strip()
+        try:
+            key_to_validate = unquote_plus(str(key_to_validate)).strip()
+        except Exception:
+            key_to_validate = str(key_to_validate).strip()
+
         now = time.time()
 
         # Admin override
@@ -496,9 +494,11 @@ def validate_key(key_to_validate=None, did=None):
                 "expires_in": int(expires_at - now)
             }
         else:
-            record = _get_key_from_store(key_to_validate)
+            # ✅ use the correct helper
+            record = get_key_record(key_to_validate)
             if not record:
-                return jsonify({"ok": False, "valid": False, "message": "Key not found"}), 404
+                # Ren'Py expects 400 for "Invalid or unknown key"
+                return jsonify({"ok": False, "valid": False, "message": "Invalid or unknown key"}), 400
 
             try:
                 rec_expires_at = float(record.get("expires_at") or 0)
@@ -516,25 +516,23 @@ def validate_key(key_to_validate=None, did=None):
                 "ok": True,
                 "valid": valid,
                 "message": "Key is valid" if valid else "Key is revoked",
-                "key": record,
                 "expires_at": rec_expires_at,
                 "expires_in": int(rec_expires_at - now)
             }
 
-        # 🔎 Legacy mode: return only ok, valid, message
-        if request.args.get("legacy") == "1":
+        # Legacy mode: always return ok, valid, message for Ren'Py
+        if request.args.get("legacy") == "1" or request.headers.get("User-Agent") == "RenPy-Client":
             return jsonify({
                 "ok": response.get("ok"),
                 "valid": response.get("valid"),
                 "message": response.get("message")
             }), 200
 
-        # 🔎 Filter response if fields=... is provided
+        # Filter response if fields=... is provided
         fields_param = request.args.get("fields")
         if fields_param:
             requested = {f.strip() for f in fields_param.split(",")}
             filtered = {k: v for k, v in response.items() if k in requested}
-            # Always include ok + valid for safety
             filtered.setdefault("ok", response.get("ok"))
             filtered.setdefault("valid", response.get("valid"))
             return jsonify(filtered), 200
@@ -544,7 +542,11 @@ def validate_key(key_to_validate=None, did=None):
 
     except Exception as e:
         app.logger.exception("Validation failed: %s", e)
-        return jsonify({"ok": False, "valid": False, "message": "Server error"}), 500
+        return jsonify({
+            "ok": False,
+            "valid": False,
+            "message": f"Server error: {type(e).__name__} - {str(e)}"
+        }), 500
 
 @app.route("/keys/burn", methods=["POST"])
 def keys_burn():
