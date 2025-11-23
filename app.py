@@ -452,57 +452,78 @@ def _get_key_from_store(key_id: str) -> Optional[dict]:
         return _KEYS_STORE.get(key_id)
 
 @app.route("/validate_key", methods=["GET", "POST"])
-def validate_key():
-    """Public: validate a key and return full record + validity state.
-    Supports both POST {key: "..."} and GET /validate_key/<key>.
+@app.route("/validate_key/<path:key_to_validate>", methods=["GET"])
+@app.route("/validate_key/<did>/<path:key_to_validate>", methods=["GET"])
+def validate_key(key_to_validate=None, did=None):
+    """
+    Public: validate a key and return full record + validity state.
+    Supports:
+      - POST { "key": "..." }
+      - GET /validate_key?key=...
+      - GET /validate_key/<key>
+      - GET /validate_key/<did>/<key> (admin override)
     """
 
-    key_to_validate = None
+    try:
+        # Handle POST JSON body
+        if request.method == "POST":
+            data = request.get_json(silent=True) or {}
+            key_to_validate = data.get("key")
 
-    # Handle POST JSON body
-    if request.method == "POST":
-        data = request.get_json(silent=True) or {}
-        key_to_validate = data.get("key")
+        # Handle GET with ?key=... or path segment
+        if request.method == "GET":
+            key_to_validate = key_to_validate or request.args.get("key")
 
-    # Handle GET with ?key=... or /validate_key/<key>
-    if request.method == "GET":
-        # First check query string (?key=...)
-        key_to_validate = key_to_validate or request.args.get("key")
-        # Then check path segment (/validate_key/<key>)
         if not key_to_validate:
-            # Strip leading slash segments
-            path_parts = request.path.rstrip("/").split("/")
-            if len(path_parts) > 1 and path_parts[-1] != "validate_key":
-                key_to_validate = path_parts[-1]
+            return jsonify({"ok": False, "valid": False, "message": "No key provided"}), 400
 
-    if not key_to_validate:
-        return jsonify({"ok": False, "valid": False, "message": "No key provided"}), 400
+        # Sanitize Android/URL encoding issues
+        key_to_validate = unquote_plus(str(key_to_validate)).strip()
+        now = time.time()
 
-    key_info = _get_key_from_store(key_to_validate)
-    if not key_info:
-        return jsonify({"ok": False, "valid": False, "message": "Key not found"}), 404
+        # Admin override support
+        if global_override or (did and admin_overrides.get(did)):
+            expires_at = now + LEGACY_LIMIT_SECONDS
+            return jsonify({
+                "ok": True,
+                "valid": True,
+                "message": "ADMIN OVERRIDE ACTIVE",
+                "expires_at": float(expires_at),
+                "expires_in": int(expires_at - now)
+            }), 200
 
-    # Compute validity: active status and optional expiry check
-    status = key_info.get("status", "active")
-    expiry_date = key_info.get("expiry")
-    expired = False
-    if expiry_date:
+        # Lookup key record
+        record = _get_key_from_store(key_to_validate)
+        if not record:
+            return jsonify({"ok": False, "valid": False, "message": "Key not found"}), 404
+
+        # Parse expiry safely
         try:
-            dt_expiry = datetime.fromisoformat(expiry_date)
-            expired = datetime.utcnow() > dt_expiry
-        except Exception:
-            expired = False
+            rec_expires_at = float(record.get("expires_at") or 0)
+        except (ValueError, TypeError):
+            return jsonify({"ok": False, "valid": False, "message": "Malformed expiry"}), 500
 
-    valid = (status == "active" and not expired)
+        # Expiry check
+        if now > rec_expires_at:
+            burn_key(key_to_validate)  # optional: revoke expired keys
+            return jsonify({"ok": False, "valid": False, "message": "Key expired"}), 410
 
-    return jsonify({
-        "ok": True,
-        "valid": valid,
-        "message": "Key is valid" if valid else "Key is revoked or expired",
-        "key": key_info,
-        "expiry": expiry_date,
-        "expires_at": expiry_date  # duplicate for clients expecting different field names
-    }), 200
+        # Status check
+        status = record.get("status", "active")
+        valid = (status == "active")
+
+        return jsonify({
+            "ok": True,
+            "valid": valid,
+            "message": "Key is valid" if valid else "Key is revoked",
+            "key": record,
+            "expires_at": rec_expires_at,
+            "expires_in": int(rec_expires_at - now)
+        }), 200
+
+    except Exception:
+        app.logger.exception("Validation failed")
+        return jsonify({"ok": False, "valid": False, "message": "Server error"}), 500
 
 @app.route("/keys/burn", methods=["POST"])
 def keys_burn():
