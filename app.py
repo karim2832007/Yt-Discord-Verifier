@@ -456,12 +456,12 @@ def _get_key_from_store(key_id: str) -> Optional[dict]:
 @app.route("/validate_key/<did>/<path:key_to_validate>", methods=["GET"])
 def validate_key(key_to_validate=None, did=None):
     """
-    Public: validate a key and return full record + validity state.
+    Validate a key and return only requested fields.
     Supports:
       - POST { "key": "..." }
-      - GET /validate_key?key=...
-      - GET /validate_key/<key>
-      - GET /validate_key/<did>/<key> (admin override)
+      - GET /validate_key?key=...&fields=valid,message
+      - GET /validate_key/<key>?fields=expires_at
+      - GET /validate_key/<did>/<key>
     """
 
     try:
@@ -477,52 +477,59 @@ def validate_key(key_to_validate=None, did=None):
         if not key_to_validate:
             return jsonify({"ok": False, "valid": False, "message": "No key provided"}), 400
 
-        # Sanitize Android/URL encoding issues
         key_to_validate = unquote_plus(str(key_to_validate)).strip()
         now = time.time()
 
-        # Admin override support
+        # Admin override
         if global_override or (did and admin_overrides.get(did)):
             expires_at = now + LEGACY_LIMIT_SECONDS
-            return jsonify({
+            response = {
                 "ok": True,
                 "valid": True,
                 "message": "ADMIN OVERRIDE ACTIVE",
                 "expires_at": float(expires_at),
                 "expires_in": int(expires_at - now)
-            }), 200
+            }
+        else:
+            record = _get_key_from_store(key_to_validate)
+            if not record:
+                return jsonify({"ok": False, "valid": False, "message": "Key not found"}), 404
 
-        # Lookup key record
-        record = _get_key_from_store(key_to_validate)
-        if not record:
-            return jsonify({"ok": False, "valid": False, "message": "Key not found"}), 404
+            try:
+                rec_expires_at = float(record.get("expires_at") or 0)
+            except Exception:
+                return jsonify({"ok": False, "valid": False, "message": "Malformed expiry"}), 500
 
-        # Parse expiry safely
-        try:
-            rec_expires_at = float(record.get("expires_at") or 0)
-        except (ValueError, TypeError):
-            return jsonify({"ok": False, "valid": False, "message": "Malformed expiry"}), 500
+            if now > rec_expires_at:
+                burn_key(key_to_validate)
+                return jsonify({"ok": False, "valid": False, "message": "Key expired"}), 410
 
-        # Expiry check
-        if now > rec_expires_at:
-            burn_key(key_to_validate)  # optional: revoke expired keys
-            return jsonify({"ok": False, "valid": False, "message": "Key expired"}), 410
+            status = record.get("status", "active")
+            valid = (status == "active")
 
-        # Status check
-        status = record.get("status", "active")
-        valid = (status == "active")
+            response = {
+                "ok": True,
+                "valid": valid,
+                "message": "Key is valid" if valid else "Key is revoked",
+                "key": record,
+                "expires_at": rec_expires_at,
+                "expires_in": int(rec_expires_at - now)
+            }
 
-        return jsonify({
-            "ok": True,
-            "valid": valid,
-            "message": "Key is valid" if valid else "Key is revoked",
-            "key": record,
-            "expires_at": rec_expires_at,
-            "expires_in": int(rec_expires_at - now)
-        }), 200
+        # 🔎 Filter response if fields=... is provided
+        fields_param = request.args.get("fields")
+        if fields_param:
+            requested = {f.strip() for f in fields_param.split(",")}
+            filtered = {k: v for k, v in response.items() if k in requested}
+            # Always include ok + valid for safety
+            filtered.setdefault("ok", response.get("ok"))
+            filtered.setdefault("valid", response.get("valid"))
+            return jsonify(filtered), 200
 
-    except Exception:
-        app.logger.exception("Validation failed")
+        return jsonify(response), 200
+
+    except Exception as e:
+        app.logger.exception("Validation failed: %s", e)
         return jsonify({"ok": False, "valid": False, "message": "Server error"}), 500
 
 @app.route("/keys/burn", methods=["POST"])
