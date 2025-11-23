@@ -459,12 +459,14 @@ def _get_key_from_store(key_id: str) -> Optional[dict]:
 @app.route("/validate_key/<did>/<path:key_to_validate>", methods=["GET"])
 def validate_key(key_to_validate=None, did=None):
     """
-    Validate a key and return only requested fields.
+    Validate a key and return requested fields.
     Supports:
       - POST { "key": "..." }
       - GET /validate_key?key=...&fields=valid,message
       - GET /validate_key/<key>?fields=expires_at
       - GET /validate_key/<did>/<key>
+    Legacy mode:
+      - GET /validate_key/<key>?legacy=1 → returns only {ok, valid, message}
     """
 
     try:
@@ -519,6 +521,14 @@ def validate_key(key_to_validate=None, did=None):
                 "expires_in": int(rec_expires_at - now)
             }
 
+        # 🔎 Legacy mode: return only ok, valid, message
+        if request.args.get("legacy") == "1":
+            return jsonify({
+                "ok": response.get("ok"),
+                "valid": response.get("valid"),
+                "message": response.get("message")
+            }), 200
+
         # 🔎 Filter response if fields=... is provided
         fields_param = request.args.get("fields")
         if fields_param:
@@ -529,6 +539,7 @@ def validate_key(key_to_validate=None, did=None):
             filtered.setdefault("valid", response.get("valid"))
             return jsonify(filtered), 200
 
+        # Default: full response
         return jsonify(response), 200
 
     except Exception as e:
