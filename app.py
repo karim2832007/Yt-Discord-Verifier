@@ -883,6 +883,26 @@ def portal_me():
         return jsonify({'ok': False, 'message': 'not authenticated'}), 401
     return jsonify({'ok': True, 'user': {'id': str(user.get('id')), 'username': user.get('username')}})
 
+@app.route("/delete-key/<key_id>", methods=["DELETE"])
+def delete_key(key_id):
+    """Delete (burn) a key permanently by ID."""
+    with _store_lock:
+        key_info = _KEYS_STORE.get(key_id)
+        if not key_info:
+            return jsonify({"ok": False, "message": "Key not found"}), 404
+
+        # Mark as revoked and remove from store
+        key_info["status"] = "revoked"
+        _KEYS_STORE.pop(key_id, None)
+
+    app.logger_custom.info(json.dumps({
+        "event": "key.deleted",
+        "key_id": key_id,
+        "user_id": key_info.get("user_id")
+    }))
+
+    return jsonify({"ok": True, "message": f"Key {key_id} deleted"}), 200
+
 # health and debug
 @app.route("/_health", methods=["GET"])
 def _health():
