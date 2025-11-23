@@ -495,7 +495,7 @@ def validate_key(key_to_validate=None, did=None):
             }
         else:
             # ✅ use the correct helper
-            record = get_key_record(key_to_validate)
+            record = _store_key_record(key_to_validate)  # or _get_key_from_store if that's the right one
             if not record:
                 # Ren'Py expects 400 for "Invalid or unknown key"
                 return jsonify({"ok": False, "valid": False, "message": "Invalid or unknown key"}), 400
