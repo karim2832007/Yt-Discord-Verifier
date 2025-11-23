@@ -258,7 +258,9 @@ except Exception:
 _store_lock = threading.RLock()
 _KEYS_STORE = {}          # key_id -> record
 _OVERRIDES_AUDIT = []     # audit entries
-
+global_override = False
+admin_overrides = {}
+LEGACY_LIMIT_SECONDS = 3600
 def _generate_key_id() -> str:
     return f"key_{int(time.time()*1000)}"
 
