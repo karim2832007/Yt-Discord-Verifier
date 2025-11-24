@@ -638,7 +638,7 @@ def create_key_route():
             "user_id": normalized["user_id"]
         }), 200
 
-    return redirect("/keys"))
+    return redirect("/keys")
 
 
 @app.route("/generate_key", methods=["POST"])
