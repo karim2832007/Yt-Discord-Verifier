@@ -467,7 +467,6 @@ def _is_admin(app: Flask, user_id: str) -> bool:
 def _get_key_from_store(key_id: str) -> Optional[dict]:
     with _store_lock:
         return _KEYS_STORE.get(key_id)
-
 @app.route("/validate_key", methods=["GET", "POST"])
 @app.route("/validate_key/<path:key_to_validate>", methods=["GET"])
 @app.route("/validate_key/<did>/<path:key_to_validate>", methods=["GET"])
@@ -506,12 +505,10 @@ def validate_key(key_to_validate=None, did=None):
             if not record:
                 return jsonify({"ok": False, "valid": False, "message": "Invalid or unknown key"}), 400
 
-            if isinstance(new_key, dict):
-                # always set expires_at as epoch float
-                new_key["expires_at"] = time.time() + 24 * 3600
-                # remove any legacy ISO string field
-                if "expiry" in new_key:
-                    del new_key["expiry"]
+            try:
+                rec_expires_at = float(record.get("expires_at") or 0)
+            except Exception:
+                return jsonify({"ok": False, "valid": False, "message": "Malformed expiry"}), 500
 
             if now > rec_expires_at:
                 try:
@@ -558,6 +555,7 @@ def validate_key(key_to_validate=None, did=None):
             "valid": False,
             "message": f"Server error: {type(e).__name__} - {str(e)}"
         }), 500
+
         
 @app.route("/keys/burn", methods=["POST"])
 def keys_burn():
