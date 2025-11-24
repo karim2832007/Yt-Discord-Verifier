@@ -472,10 +472,7 @@ def _get_key_from_store(key_id: str) -> Optional[dict]:
 @app.route("/validate_key/<path:key_to_validate>", methods=["GET"])
 @app.route("/validate_key/<did>/<path:key_to_validate>", methods=["GET"])
 def validate_key(key_to_validate=None, did=None):
-    """
-    Validate a key and return requested fields.
-    Legacy mode: always returns ok, valid, message for Ren'Py client.
-    """
+    """Validate a key and return requested fields. Legacy mode: always returns ok, valid, message for Ren'Py client."""
 
     try:
         # Handle POST JSON body
@@ -490,11 +487,7 @@ def validate_key(key_to_validate=None, did=None):
         if not key_to_validate:
             return jsonify({"ok": False, "valid": False, "message": "No key provided"}), 400
 
-        try:
-            key_to_validate = unquote_plus(str(key_to_validate)).strip()
-        except Exception:
-            key_to_validate = str(key_to_validate).strip()
-
+        key_to_validate = unquote_plus(str(key_to_validate)).strip()
         now = time.time()
 
         # Admin override
@@ -514,15 +507,7 @@ def validate_key(key_to_validate=None, did=None):
                 return jsonify({"ok": False, "valid": False, "message": "Invalid or unknown key"}), 400
 
             try:
-                raw_exp = float(record.get("expires_at") or 0)
-                # interpret expiry as UTC
-                utc_exp = datetime.fromtimestamp(raw_exp, tz=pytz.UTC)
-
-                # detect server's local timezone dynamically
-                local_tz = datetime.now().astimezone().tzinfo
-
-                # convert expiry to local time (NO subtraction)
-                rec_expires_at = utc_exp.astimezone(local_tz).timestamp()
+                rec_expires_at = float(record.get("expires_at") or 0)
             except Exception:
                 return jsonify({"ok": False, "valid": False, "message": "Malformed expiry"}), 500
 
@@ -613,16 +598,20 @@ def create_key_route():
         else:
             normalized["user_id"] = request.headers.get("X-User-Id") or "anonymous"
 
+    # Create the key
     mode = normalized.get("mode", "quick")
     if mode == "quick":
         new_key = quick_key_create(app, normalized)
     else:
         new_key = custom_key_create(app, normalized)
 
-    # Ensure expiry is set (default 24h from now)
-    if isinstance(new_key, dict) and not new_key.get("expires_at"):
-        # store as epoch timestamp (float), not ISO string
-        new_key["expires_at"] = (time.time() + 24 * 3600)
+    # Ensure expiry is set (default 24h from now) as epoch float
+    if isinstance(new_key, dict):
+        if not new_key.get("expires_at"):
+            new_key["expires_at"] = time.time() + 24 * 3600
+        # normalize: remove any legacy "expiry" ISO string
+        if "expiry" in new_key:
+            del new_key["expiry"]
 
     # Decide whether to return JSON or redirect
     wants_json = (
