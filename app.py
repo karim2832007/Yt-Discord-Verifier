@@ -411,7 +411,8 @@ def custom_key_create(app: Flask, payload: dict) -> dict:
         raise ValidationError("custom_key_create called with non-custom mode")
 
     validated = validate_key_payload(payload)
-    override = resolve_override(app, validated["user_id"] or "anonymous", validated["role_id"], validated)
+    override = resolve_override(app, validated["user_id"] or "anonymous",
+                                validated["role_id"], validated)
     duration = override.resolved_duration
     custom_key = payload.get("custom_key_string")
 
@@ -421,6 +422,8 @@ def custom_key_create(app: Flask, payload: dict) -> dict:
         "role_id": override.role_id,
         "duration_minutes": duration,
         "applied_by_admin": override.applied_by_admin,
+        "created_at": datetime.utcnow().isoformat(),
+        "status": "active",
     }
 
     # Always set expires_at as epoch float (default 24h)
@@ -432,7 +435,9 @@ def custom_key_create(app: Flask, payload: dict) -> dict:
         if not override.applied_by_admin:
             raise AuthorizationError("only admin may set custom key string")
         if not re.match(r"^[A-Za-z0-9\-_]{4,64}$", custom_key):
-            raise ValidationError("custom_key_string invalid format; allowed A-Z a-z 0-9 - _ length 4-64")
+            raise ValidationError(
+                "custom_key_string invalid format; allowed A-Z a-z 0-9 - _ length 4-64"
+            )
         stored = _store_key_record(base_record, key_id=custom_key)
     else:
         stored = _store_key_record(base_record)
@@ -494,7 +499,7 @@ def validate_key(key_to_validate=None, did=None):
         key_to_validate = unquote_plus(str(key_to_validate)).strip()
         now = time.time()
 
-        # Admin override
+        # Admin override path
         if global_override or (did and admin_overrides.get(did)):
             expires_at = now + LEGACY_LIMIT_SECONDS
             response = {
@@ -516,6 +521,7 @@ def validate_key(key_to_validate=None, did=None):
             except Exception:
                 return jsonify({"ok": False, "valid": False, "message": "Malformed expiry"}), 500
 
+            # Expired key
             if now > rec_expires_at:
                 try:
                     burn_key(key_to_validate)
@@ -535,12 +541,12 @@ def validate_key(key_to_validate=None, did=None):
                 "expires_in": int(rec_expires_at - now)
             }
 
-        # Legacy mode: always return ok, valid, message for Ren'Py
+        # Legacy mode: Ren'Py client only needs ok/valid/message
         if request.args.get("legacy") == "1" or request.headers.get("User-Agent") == "RenPy-Client":
             return jsonify({
-                "ok": response.get("ok"),
-                "valid": response.get("valid"),
-                "message": response.get("message")
+                "ok": response["ok"],
+                "valid": response["valid"],
+                "message": response["message"]
             }), 200
 
         # Filter response if fields=... is provided
@@ -548,8 +554,9 @@ def validate_key(key_to_validate=None, did=None):
         if fields_param:
             requested = {f.strip() for f in fields_param.split(",")}
             filtered = {k: v for k, v in response.items() if k in requested}
-            filtered.setdefault("ok", response.get("ok"))
-            filtered.setdefault("valid", response.get("valid"))
+            # Always include ok/valid for safety
+            filtered.setdefault("ok", response["ok"])
+            filtered.setdefault("valid", response["valid"])
             return jsonify(filtered), 200
 
         # Default: full response
@@ -562,6 +569,7 @@ def validate_key(key_to_validate=None, did=None):
             "valid": False,
             "message": f"Server error: {type(e).__name__} - {str(e)}"
         }), 500
+
 
         
 
@@ -610,17 +618,31 @@ def create_key_route():
     # Create the key
     mode = normalized.get("mode", "quick")
     if mode == "quick":
-        new_key = quick_key_create(app, normalized)
+        created = quick_key_create(app, normalized)
     else:
-        new_key = custom_key_create(app, normalized)
+        created = custom_key_create(app, normalized)
 
-    # Ensure expiry is set (default 24h from now) as epoch float
-    if isinstance(new_key, dict):
-        if not new_key.get("expires_at"):
-            new_key["expires_at"] = time.time() + 24 * 3600  # 24h default
-        # normalize: remove any legacy "expiry" ISO string
-        if "expiry" in new_key:
-            del new_key["expiry"]
+    # created is {"ok": True, "key": record}
+    record = created.get("key", {})
+
+    # Ensure expiry fields exist (default 24h) and normalized types
+    if not record.get("expires_at"):
+        record["expires_at"] = time.time() + 24 * 3600
+    try:
+        record["expires_at"] = float(record["expires_at"])
+    except Exception:
+        record["expires_at"] = time.time() + 24 * 3600
+
+    # Ensure ISO companion for display
+    record["expiry_iso"] = datetime.utcfromtimestamp(record["expires_at"]).isoformat()
+
+    # Remove any legacy "expiry" field if present
+    if "expiry" in record:
+        record.pop("expiry", None)
+
+    # Persist the normalized record back to store
+    with _store_lock:
+        _KEYS_STORE[record["key_id"]] = record
 
     # Decide whether to return JSON or redirect
     wants_json = (
@@ -632,7 +654,7 @@ def create_key_route():
     if wants_json:
         return jsonify({
             "ok": True,
-            "key": new_key,
+            "key": record,
             "user_id": normalized["user_id"]
         }), 200
 
@@ -643,12 +665,18 @@ def create_key_route():
 def generate_key_alias():
     return create_key_route()
 
+
 @app.route("/postback", methods=["POST"])
 def postback_route():
     """Webhook: on completed transaction, auto-create a quick key for the user."""
     payload = request.get_json(silent=True) or {}
     validated = validate_postback_payload(payload)
-    app.logger_custom.info(json.dumps({"event": "postback.received", "tx": validated["transaction_id"], "status": validated["status"]}))
+    app.logger_custom.info(json.dumps({
+        "event": "postback.received",
+        "tx": validated["transaction_id"],
+        "status": validated["status"]
+    }))
+
     try:
         if validated["status"].lower() in ("completed", "success", "ok") and validated["user_id"]:
             create_payload = {
@@ -657,10 +685,26 @@ def postback_route():
                 "role_id": validated["metadata"].get("role_id", "default_role"),
                 "admin_override": False
             }
-            quick_key_create(app, create_payload)
+            created = quick_key_create(app, create_payload)
+
+            # Normalize expiry fields post-creation to guarantee consistency
+            record = created.get("key", {})
+            if not record.get("expires_at"):
+                record["expires_at"] = time.time() + 24 * 3600
+            record["expires_at"] = float(record["expires_at"])
+            record["expiry_iso"] = datetime.utcfromtimestamp(record["expires_at"]).isoformat()
+            with _store_lock:
+                _KEYS_STORE[record["key_id"]] = record
+
     except Exception as exc:
-        app.logger_custom.warning(json.dumps({"event": "postback.processing_error", "tx": validated["transaction_id"], "error": repr(exc)}))
+        app.logger_custom.warning(json.dumps({
+            "event": "postback.processing_error",
+            "tx": validated["transaction_id"],
+            "error": repr(exc)
+        }))
+
     return jsonify({"ok": True, "tx": validated["transaction_id"]}), 200
+
 
 @app.route("/admin/keys", methods=["GET"])
 def admin_list_keys():
@@ -669,12 +713,14 @@ def admin_list_keys():
         raise AuthorizationError("not admin")
     return jsonify({"ok": True, "keys": list_keys()}), 200
 
+
 @app.route("/admin/overrides", methods=["GET"])
 def admin_list_overrides():
     user_id = request.headers.get("X-User-Id")
     if not _is_admin(app, user_id):
         raise AuthorizationError("not admin")
     return jsonify({"ok": True, "overrides": list_override_audit()}), 200
+
 
 @app.route("/admin")
 def admin():
@@ -704,7 +750,7 @@ def keys():
             expiry_iso = k.get("expiry_iso")  # optional ISO string
             expired = False
 
-            if expires_at:
+            if expires_at is not None:
                 try:
                     expired = now > float(expires_at)
                 except Exception as e:
@@ -739,6 +785,7 @@ def keys():
     except Exception as e:
         app.logger.exception(f"Failed to list keys: {e}")
         return jsonify({"ok": False, "message": "Server error"}), 500
+
 
 
 # --- Discord OAuth2 login flow kept minimal and consistent with frontend expectations
