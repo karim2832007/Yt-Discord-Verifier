@@ -467,11 +467,15 @@ def _is_admin(app: Flask, user_id: str) -> bool:
 def _get_key_from_store(key_id: str) -> Optional[dict]:
     with _store_lock:
         return _KEYS_STORE.get(key_id)
+
+
 @app.route("/validate_key", methods=["GET", "POST"])
 @app.route("/validate_key/<path:key_to_validate>", methods=["GET"])
 @app.route("/validate_key/<did>/<path:key_to_validate>", methods=["GET"])
 def validate_key(key_to_validate=None, did=None):
-    """Validate a key and return requested fields. Legacy mode: always returns ok, valid, message for Ren'Py client."""
+    """Validate a key and return requested fields.
+    Legacy mode: always returns ok, valid, message for Ren'Py client.
+    """
 
     try:
         # Handle POST JSON body
@@ -555,6 +559,7 @@ def validate_key(key_to_validate=None, did=None):
             "valid": False,
             "message": f"Server error: {type(e).__name__} - {str(e)}"
         }), 500
+        
 
         
 @app.route("/keys/burn", methods=["POST"])
