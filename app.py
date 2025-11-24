@@ -358,8 +358,6 @@ def _store_key_record(record: dict, key_id: Optional[str] = None) -> dict:
         _KEYS_STORE[record["key_id"]] = record
         return _KEYS_STORE[record["key_id"]]
 
-
-
 def generate_random_key(length=10) -> str:
     """Generate a random alphanumeric key string of given length."""
     alphabet = string.ascii_letters + string.digits
@@ -381,18 +379,16 @@ def quick_key_create(app: Flask, payload: dict) -> dict:
         "role_id": override.role_id,
         "duration_minutes": duration,
         "applied_by_admin": override.applied_by_admin,
+        "created_at": datetime.utcnow().isoformat(),
+        "status": "active",
     }
 
+    # Always set expiry fields
     record["expires_at"] = float(time.time() + 24 * 3600)  # epoch float
     record["expiry_iso"] = datetime.utcfromtimestamp(record["expires_at"]).isoformat()
-    record["status"] = "active"
-    record["created_at"] = datetime.utcnow().isoformat()
-
 
     key_id = generate_random_key(10)
     record["key_id"] = key_id
-    record["created_at"] = datetime.utcnow().isoformat()
-    record["status"] = "active"
 
     with _store_lock:
         _KEYS_STORE[key_id] = record
@@ -427,11 +423,9 @@ def custom_key_create(app: Flask, payload: dict) -> dict:
         "status": "active",
     }
 
-    record["expires_at"] = float(time.time() + 24 * 3600)  # epoch float
-    record["expiry_iso"] = datetime.utcfromtimestamp(record["expires_at"]).isoformat()
-    record["status"] = "active"
-    record["created_at"] = datetime.utcnow().isoformat()
-
+    # Always set expiry fields
+    base_record["expires_at"] = float(time.time() + 24 * 3600)
+    base_record["expiry_iso"] = datetime.utcfromtimestamp(base_record["expires_at"]).isoformat()
 
     if custom_key is not None:
         if not override.applied_by_admin:
@@ -451,6 +445,8 @@ def custom_key_create(app: Flask, payload: dict) -> dict:
         "user_id": stored["user_id"]
     }))
     return {"ok": True, "key": stored}
+
+
 
 
 
@@ -477,6 +473,7 @@ def _get_key_from_store(key_id: str) -> Optional[dict]:
         return _KEYS_STORE.get(key_id)
 
 
+
 @app.route("/validate_key", methods=["GET", "POST"])
 @app.route("/validate_key/<path:key_to_validate>", methods=["GET"])
 @app.route("/validate_key/<did>/<path:key_to_validate>", methods=["GET"])
@@ -484,7 +481,6 @@ def validate_key(key_to_validate=None, did=None):
     """Validate a key and return requested fields.
     Legacy mode: always returns ok, valid, message for Ren'Py client.
     """
-
     try:
         # Handle POST JSON body
         if request.method == "POST":
@@ -503,12 +499,12 @@ def validate_key(key_to_validate=None, did=None):
 
         # Admin override path
         if global_override or (did and admin_overrides.get(did)):
-            expires_at = now + LEGACY_LIMIT_SECONDS
+            expires_at = float(now + LEGACY_LIMIT_SECONDS)
             response = {
                 "ok": True,
                 "valid": True,
                 "message": "ADMIN OVERRIDE ACTIVE",
-                "expires_at": float(expires_at),
+                "expires_at": expires_at,
                 "expiry_iso": datetime.utcfromtimestamp(expires_at).isoformat(),
                 "expires_in": int(expires_at - now)
             }
