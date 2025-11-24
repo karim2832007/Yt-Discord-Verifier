@@ -506,10 +506,12 @@ def validate_key(key_to_validate=None, did=None):
             if not record:
                 return jsonify({"ok": False, "valid": False, "message": "Invalid or unknown key"}), 400
 
-            try:
-                rec_expires_at = float(record.get("expires_at") or 0)
-            except Exception:
-                return jsonify({"ok": False, "valid": False, "message": "Malformed expiry"}), 500
+            if isinstance(new_key, dict):
+                # always set expires_at as epoch float
+                new_key["expires_at"] = time.time() + 24 * 3600
+                # remove any legacy ISO string field
+                if "expiry" in new_key:
+                    del new_key["expiry"]
 
             if now > rec_expires_at:
                 try:
@@ -608,7 +610,7 @@ def create_key_route():
     # Ensure expiry is set (default 24h from now) as epoch float
     if isinstance(new_key, dict):
         if not new_key.get("expires_at"):
-            new_key["expires_at"] = time.time() + 24 * 3600
+            new_key["expires_at"] = time.time() + 24 * 3600  # 24h default
         # normalize: remove any legacy "expiry" ISO string
         if "expiry" in new_key:
             del new_key["expiry"]
