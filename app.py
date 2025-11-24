@@ -383,10 +383,11 @@ def quick_key_create(app: Flask, payload: dict) -> dict:
         "applied_by_admin": override.applied_by_admin,
     }
 
-    # Always set expires_at as epoch float (default 24h)
-    record["expires_at"] = time.time() + 24 * 3600
-    # Add ISO string for display
+    record["expires_at"] = float(time.time() + 24 * 3600)  # epoch float
     record["expiry_iso"] = datetime.utcfromtimestamp(record["expires_at"]).isoformat()
+    record["status"] = "active"
+    record["created_at"] = datetime.utcnow().isoformat()
+
 
     key_id = generate_random_key(10)
     record["key_id"] = key_id
@@ -426,10 +427,11 @@ def custom_key_create(app: Flask, payload: dict) -> dict:
         "status": "active",
     }
 
-    # Always set expires_at as epoch float (default 24h)
-    base_record["expires_at"] = time.time() + 24 * 3600
-    # Add ISO string for display
-    base_record["expiry_iso"] = datetime.utcfromtimestamp(base_record["expires_at"]).isoformat()
+    record["expires_at"] = float(time.time() + 24 * 3600)  # epoch float
+    record["expiry_iso"] = datetime.utcfromtimestamp(record["expires_at"]).isoformat()
+    record["status"] = "active"
+    record["created_at"] = datetime.utcnow().isoformat()
+
 
     if custom_key is not None:
         if not override.applied_by_admin:
