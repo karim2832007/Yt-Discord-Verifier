@@ -468,9 +468,6 @@ def _get_key_from_store(key_id: str) -> Optional[dict]:
     with _store_lock:
         return _KEYS_STORE.get(key_id)
 
-from datetime import datetime, timedelta
-import pytz
-
 @app.route("/validate_key", methods=["GET", "POST"])
 @app.route("/validate_key/<path:key_to_validate>", methods=["GET"])
 @app.route("/validate_key/<did>/<path:key_to_validate>", methods=["GET"])
@@ -524,9 +521,8 @@ def validate_key(key_to_validate=None, did=None):
                 # detect server's local timezone dynamically
                 local_tz = datetime.now().astimezone().tzinfo
 
-                # convert expiry to local time and subtract one hour
-                adjusted_exp = utc_exp.astimezone(local_tz) - timedelta(hours=1)
-                rec_expires_at = adjusted_exp.timestamp()
+                # convert expiry to local time (NO subtraction)
+                rec_expires_at = utc_exp.astimezone(local_tz).timestamp()
             except Exception:
                 return jsonify({"ok": False, "valid": False, "message": "Malformed expiry"}), 500
 
@@ -624,8 +620,9 @@ def create_key_route():
         new_key = custom_key_create(app, normalized)
 
     # Ensure expiry is set (default 24h from now)
-    if isinstance(new_key, dict) and not new_key.get("expiry"):
-        new_key["expiry"] = (datetime.utcnow() + timedelta(hours=24)).isoformat()
+    if isinstance(new_key, dict) and not new_key.get("expires_at"):
+        # store as epoch timestamp (float), not ISO string
+        new_key["expires_at"] = (time.time() + 24 * 3600)
 
     # Decide whether to return JSON or redirect
     wants_json = (
@@ -641,7 +638,7 @@ def create_key_route():
             "user_id": normalized["user_id"]
         }), 200
 
-    return redirect("/keys")
+    return redirect("/keys"))
 
 
 @app.route("/generate_key", methods=["POST"])
