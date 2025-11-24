@@ -366,7 +366,6 @@ def generate_random_key(length=10) -> str:
     return ''.join(secrets.choice(alphabet) for _ in range(length))
 
 def quick_key_create(app: Flask, payload: dict) -> dict:
-    """Internal helper: create a quick key (not a public route)."""
     if payload.get("mode") != "quick":
         raise ValidationError("quick_key_create called with non-quick mode")
 
@@ -375,7 +374,6 @@ def quick_key_create(app: Flask, payload: dict) -> dict:
                                 validated["role_id"], validated)
     duration = override.resolved_duration
 
-    # Build the record
     record = {
         "type": "quick",
         "user_id": validated["user_id"],
@@ -384,19 +382,14 @@ def quick_key_create(app: Flask, payload: dict) -> dict:
         "applied_by_admin": override.applied_by_admin,
     }
 
-    # Add expiry: use provided one or default to 24h
-    if "expiry" in validated:
-        record["expiry"] = validated["expiry"]
-    else:
-        record["expiry"] = (datetime.utcnow() + timedelta(hours=24)).isoformat()
+    # Always set expires_at as epoch float (default 24h)
+    record["expires_at"] = time.time() + 24 * 3600
 
-    # Generate a random 10-character key string
     key_id = generate_random_key(10)
     record["key_id"] = key_id
     record["created_at"] = datetime.utcnow().isoformat()
     record["status"] = "active"
 
-    # Store in memory
     with _store_lock:
         _KEYS_STORE[key_id] = record
 
@@ -408,9 +401,9 @@ def quick_key_create(app: Flask, payload: dict) -> dict:
     }))
 
     return {"ok": True, "key": record}
+
     
 def custom_key_create(app: Flask, payload: dict) -> dict:
-    """Internal helper: create a custom key (not a public route)."""
     if payload.get("mode") != "custom":
         raise ValidationError("custom_key_create called with non-custom mode")
 
@@ -426,8 +419,9 @@ def custom_key_create(app: Flask, payload: dict) -> dict:
         "duration_minutes": duration,
         "applied_by_admin": override.applied_by_admin,
     }
-    if "expiry" in validated:
-        base_record["expiry"] = validated["expiry"]
+
+    # Always set expires_at as epoch float (default 24h)
+    base_record["expires_at"] = time.time() + 24 * 3600
 
     if custom_key is not None:
         if not override.applied_by_admin:
@@ -445,6 +439,7 @@ def custom_key_create(app: Flask, payload: dict) -> dict:
         "user_id": stored["user_id"]
     }))
     return {"ok": True, "key": stored}
+
 
 def list_keys() -> list:
     with _store_lock:
