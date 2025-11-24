@@ -601,7 +601,7 @@ def keys_burn():
 def create_key_route():
     """Public: create a key.
     - POST: JSON API for clients
-    - GET: browser flows (loot-link redirect) → auto redirect to /keys
+    - GET: browser flows (loot-link redirect) → auto redirect to public Keys page
     """
     if request.method == "POST":
         payload = request.get_json(silent=True) or {}
@@ -649,9 +649,10 @@ def create_key_route():
                 "user_id": normalized["user_id"]
             }), 200
 
+        # For non‑JSON POST, redirect to internal Keys page
         return redirect("/keys")
 
-    # --- GET flow: generate quick key and redirect to Keys page ---
+    # --- GET flow: generate quick key and redirect to public Keys page ---
     user_id = None
     if "user" in session and session["user"].get("id"):
         user_id = str(session["user"]["id"])
@@ -670,8 +671,9 @@ def create_key_route():
     with _store_lock:
         _KEYS_STORE[record["key_id"]] = record
 
-    # Always redirect back to Keys page for browser flows
-    return redirect("/keys")
+    # Always redirect back to the public Keys page
+    return redirect("https://gaming-mods.com/keys.html")
+
 
 
 
