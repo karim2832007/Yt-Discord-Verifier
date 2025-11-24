@@ -232,6 +232,19 @@ def validate_postback_payload(data: dict) -> dict:
         "metadata": metadata
     }
 
+def burn_key(key_to_burn: str):
+    """Internal helper: mark a key as revoked in the store."""
+    with _store_lock:
+        key_info = _KEYS_STORE.get(key_to_burn)
+        if key_info:
+            key_info["status"] = "revoked"
+            _KEYS_STORE[key_to_burn] = key_info
+            app.logger_custom.info(json.dumps({
+                "event": "key.burned",
+                "key_id": key_to_burn,
+                "user_id": key_info.get("user_id")
+            }))
+
 # register exception handlers
 def _register_exception_handlers(app: Flask):
     @app.errorhandler(ValidationError)
