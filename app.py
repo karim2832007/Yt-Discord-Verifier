@@ -365,6 +365,7 @@ def generate_random_key(length=10) -> str:
     alphabet = string.ascii_letters + string.digits
     return ''.join(secrets.choice(alphabet) for _ in range(length))
 
+
 def quick_key_create(app: Flask, payload: dict) -> dict:
     if payload.get("mode") != "quick":
         raise ValidationError("quick_key_create called with non-quick mode")
@@ -384,6 +385,8 @@ def quick_key_create(app: Flask, payload: dict) -> dict:
 
     # Always set expires_at as epoch float (default 24h)
     record["expires_at"] = time.time() + 24 * 3600
+    # Add ISO string for display
+    record["expiry_iso"] = datetime.utcfromtimestamp(record["expires_at"]).isoformat()
 
     key_id = generate_random_key(10)
     record["key_id"] = key_id
@@ -402,7 +405,7 @@ def quick_key_create(app: Flask, payload: dict) -> dict:
 
     return {"ok": True, "key": record}
 
-    
+
 def custom_key_create(app: Flask, payload: dict) -> dict:
     if payload.get("mode") != "custom":
         raise ValidationError("custom_key_create called with non-custom mode")
@@ -422,6 +425,8 @@ def custom_key_create(app: Flask, payload: dict) -> dict:
 
     # Always set expires_at as epoch float (default 24h)
     base_record["expires_at"] = time.time() + 24 * 3600
+    # Add ISO string for display
+    base_record["expiry_iso"] = datetime.utcfromtimestamp(base_record["expires_at"]).isoformat()
 
     if custom_key is not None:
         if not override.applied_by_admin:
@@ -439,6 +444,7 @@ def custom_key_create(app: Flask, payload: dict) -> dict:
         "user_id": stored["user_id"]
     }))
     return {"ok": True, "key": stored}
+
 
 
 def list_keys() -> list:
@@ -496,6 +502,7 @@ def validate_key(key_to_validate=None, did=None):
                 "valid": True,
                 "message": "ADMIN OVERRIDE ACTIVE",
                 "expires_at": float(expires_at),
+                "expiry_iso": datetime.utcfromtimestamp(expires_at).isoformat(),
                 "expires_in": int(expires_at - now)
             }
         else:
@@ -524,6 +531,7 @@ def validate_key(key_to_validate=None, did=None):
                 "valid": valid,
                 "message": "Key is valid" if valid else "Key is revoked",
                 "expires_at": rec_expires_at,
+                "expiry_iso": datetime.utcfromtimestamp(rec_expires_at).isoformat(),
                 "expires_in": int(rec_expires_at - now)
             }
 
@@ -554,6 +562,7 @@ def validate_key(key_to_validate=None, did=None):
             "valid": False,
             "message": f"Server error: {type(e).__name__} - {str(e)}"
         }), 500
+
         
 
         
@@ -688,17 +697,18 @@ def keys():
             ]
 
         formatted = []
+        now = time.time()
         for k in user_keys:
             status = k.get("status", "active")
-            expiry_date = k.get("expiry")
+            expires_at = k.get("expires_at")  # float epoch
+            expiry_iso = k.get("expiry_iso")  # optional ISO string
             expired = False
 
-            if expiry_date:
+            if expires_at:
                 try:
-                    dt_expiry = datetime.fromisoformat(expiry_date)
-                    expired = datetime.utcnow() > dt_expiry
+                    expired = now > float(expires_at)
                 except Exception as e:
-                    app.logger.warning(f"Expiry parse failed: {expiry_date} ({e})")
+                    app.logger.warning(f"Expiry parse failed: {expires_at} ({e})")
                     expired = False
 
             valid = (status == "active" and not expired)
@@ -709,7 +719,8 @@ def keys():
                 "owner": k.get("user_id"),
                 "role_id": k.get("role_id"),
                 "created_at": k.get("created_at"),
-                "expiry": expiry_date,
+                "expires_at": expires_at,
+                "expiry_iso": expiry_iso,
                 "status": status,
                 "valid": valid,
                 "message": "Key is valid" if valid else "Key is revoked or expired",
@@ -728,6 +739,7 @@ def keys():
     except Exception as e:
         app.logger.exception(f"Failed to list keys: {e}")
         return jsonify({"ok": False, "message": "Server error"}), 500
+
 
 # --- Discord OAuth2 login flow kept minimal and consistent with frontend expectations
 OAUTH_STATE_KEY = "oauth2_state"
