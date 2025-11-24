@@ -9,6 +9,7 @@ import threading
 from logging.handlers import RotatingFileHandler
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any
+import pytz
 import importlib
 import string, secrets
 import requests
@@ -495,13 +496,22 @@ def validate_key(key_to_validate=None, did=None):
             }
         else:
             # ✅ use the correct helper
-            record = _store_key_record(key_to_validate)  # or _get_key_from_store if that's the right one
+            record = _get_key_from_store(key_to_validate)
             if not record:
-                # Ren'Py expects 400 for "Invalid or unknown key"
                 return jsonify({"ok": False, "valid": False, "message": "Invalid or unknown key"}), 400
 
             try:
-                rec_expires_at = float(record.get("expires_at") or 0)
+                raw_exp = float(record.get("expires_at") or 0)
+                # interpret expiry as UTC
+                utc_exp = datetime.fromtimestamp(raw_exp, tz=pytz.UTC)
+
+                # detect server's local timezone dynamically
+                local_tz = datetime.now().astimezone().tzinfo
+
+                # convert expiry to local time and subtract one hour
+                adjusted_exp = utc_exp.astimezone(local_tz) - timedelta(hours=1)
+
+                rec_expires_at = adjusted_exp.timestamp()
             except Exception:
                 return jsonify({"ok": False, "valid": False, "message": "Malformed expiry"}), 500
 
