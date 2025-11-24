@@ -601,7 +601,7 @@ def keys_burn():
 def create_key_route():
     """Public: create a key.
     - POST: JSON API for clients
-    - GET: allow browser flows (e.g. loot-link redirect)
+    - GET: browser flows (loot-link redirect) → auto redirect to /keys
     """
     if request.method == "POST":
         payload = request.get_json(silent=True) or {}
@@ -626,17 +626,12 @@ def create_key_route():
 
         record = created.get("key", {})
 
-        # Ensure expiry fields exist (default 24h) and normalized types
+        # Ensure expiry fields exist (default 24h)
         if not record.get("expires_at"):
             record["expires_at"] = time.time() + 24 * 3600
-        try:
-            record["expires_at"] = float(record["expires_at"])
-        except Exception:
-            record["expires_at"] = time.time() + 24 * 3600
-
+        record["expires_at"] = float(record["expires_at"])
         record["expiry_iso"] = datetime.utcfromtimestamp(record["expires_at"]).isoformat()
-        if "expiry" in record:
-            record.pop("expiry", None)
+        record.pop("expiry", None)
 
         with _store_lock:
             _KEYS_STORE[record["key_id"]] = record
@@ -656,8 +651,7 @@ def create_key_route():
 
         return redirect("/keys")
 
-    # --- GET flow: allow external link open (loot-link redirect) ---
-    # Generate a quick key for the current session user
+    # --- GET flow: generate quick key and redirect to Keys page ---
     user_id = None
     if "user" in session and session["user"].get("id"):
         user_id = str(session["user"]["id"])
@@ -676,15 +670,9 @@ def create_key_route():
     with _store_lock:
         _KEYS_STORE[record["key_id"]] = record
 
-    # Render a simple HTML page showing the new key
-    return f"""
-    <html><body style="font-family:sans-serif;background:#111;color:#eee">
-      <h2>New Key Generated</h2>
-      <p><strong>Key:</strong> <code>{record.get('key_id')}</code></p>
-      <p><strong>Expires at:</strong> {record.get('expiry_iso')}</p>
-      <p>You can now return to <a href="/keys" style="color:#0ff">Key Management</a>.</p>
-    </body></html>
-    """
+    # Always redirect back to Keys page for browser flows
+    return redirect("/keys")
+
 
 
 
