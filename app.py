@@ -468,6 +468,9 @@ def _get_key_from_store(key_id: str) -> Optional[dict]:
     with _store_lock:
         return _KEYS_STORE.get(key_id)
 
+from datetime import datetime, timedelta
+import pytz
+
 @app.route("/validate_key", methods=["GET", "POST"])
 @app.route("/validate_key/<path:key_to_validate>", methods=["GET"])
 @app.route("/validate_key/<did>/<path:key_to_validate>", methods=["GET"])
@@ -508,7 +511,7 @@ def validate_key(key_to_validate=None, did=None):
                 "expires_in": int(expires_at - now)
             }
         else:
-            # ✅ use the correct helper
+            # Lookup record
             record = _get_key_from_store(key_to_validate)
             if not record:
                 return jsonify({"ok": False, "valid": False, "message": "Invalid or unknown key"}), 400
@@ -523,13 +526,15 @@ def validate_key(key_to_validate=None, did=None):
 
                 # convert expiry to local time and subtract one hour
                 adjusted_exp = utc_exp.astimezone(local_tz) - timedelta(hours=1)
-
                 rec_expires_at = adjusted_exp.timestamp()
             except Exception:
                 return jsonify({"ok": False, "valid": False, "message": "Malformed expiry"}), 500
 
             if now > rec_expires_at:
-                burn_key(key_to_validate)
+                try:
+                    burn_key(key_to_validate)
+                except Exception:
+                    app.logger.exception("burn_key failed")
                 return jsonify({"ok": False, "valid": False, "message": "Key expired"}), 410
 
             status = record.get("status", "active")
@@ -570,7 +575,7 @@ def validate_key(key_to_validate=None, did=None):
             "valid": False,
             "message": f"Server error: {type(e).__name__} - {str(e)}"
         }), 500
-
+        
 @app.route("/keys/burn", methods=["POST"])
 def keys_burn():
     """Public: burn (revoke) a key by ID."""
