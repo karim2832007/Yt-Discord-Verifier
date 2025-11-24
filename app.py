@@ -597,66 +597,95 @@ def keys_burn():
 
     return jsonify({"ok": True, "message": f"Key {key_to_burn} burned"}), 200
 
-@app.route("/create-key", methods=["POST"])
+@app.route("/create-key", methods=["GET", "POST"])
 def create_key_route():
-    """Public: create a key. Returns JSON for API clients, redirect for browser flows."""
-    payload = request.get_json(silent=True) or {}
-    try:
-        normalized = validate_key_payload(payload)
-    except ValidationError as e:
-        return jsonify({"ok": False, "error": str(e)}), 400
+    """Public: create a key.
+    - POST: JSON API for clients
+    - GET: allow browser flows (e.g. loot-link redirect)
+    """
+    if request.method == "POST":
+        payload = request.get_json(silent=True) or {}
+        try:
+            normalized = validate_key_payload(payload)
+        except ValidationError as e:
+            return jsonify({"ok": False, "error": str(e)}), 400
 
-    # Prefer the logged-in session user ID
-    if not normalized.get("user_id"):
-        if "user" in session and session["user"].get("id"):
-            normalized["user_id"] = str(session["user"]["id"])
+        # Prefer the logged-in session user ID
+        if not normalized.get("user_id"):
+            if "user" in session and session["user"].get("id"):
+                normalized["user_id"] = str(session["user"]["id"])
+            else:
+                normalized["user_id"] = request.headers.get("X-User-Id") or "anonymous"
+
+        # Create the key
+        mode = normalized.get("mode", "quick")
+        if mode == "quick":
+            created = quick_key_create(app, normalized)
         else:
-            normalized["user_id"] = request.headers.get("X-User-Id") or "anonymous"
+            created = custom_key_create(app, normalized)
 
-    # Create the key
-    mode = normalized.get("mode", "quick")
-    if mode == "quick":
-        created = quick_key_create(app, normalized)
+        record = created.get("key", {})
+
+        # Ensure expiry fields exist (default 24h) and normalized types
+        if not record.get("expires_at"):
+            record["expires_at"] = time.time() + 24 * 3600
+        try:
+            record["expires_at"] = float(record["expires_at"])
+        except Exception:
+            record["expires_at"] = time.time() + 24 * 3600
+
+        record["expiry_iso"] = datetime.utcfromtimestamp(record["expires_at"]).isoformat()
+        if "expiry" in record:
+            record.pop("expiry", None)
+
+        with _store_lock:
+            _KEYS_STORE[record["key_id"]] = record
+
+        wants_json = (
+            request.is_json
+            or request.headers.get("X-Requested-With") == "XMLHttpRequest"
+            or "application/json" in (request.headers.get("Accept") or "")
+        )
+
+        if wants_json:
+            return jsonify({
+                "ok": True,
+                "key": record,
+                "user_id": normalized["user_id"]
+            }), 200
+
+        return redirect("/keys")
+
+    # --- GET flow: allow external link open (loot-link redirect) ---
+    # Generate a quick key for the current session user
+    user_id = None
+    if "user" in session and session["user"].get("id"):
+        user_id = str(session["user"]["id"])
     else:
-        created = custom_key_create(app, normalized)
+        user_id = request.args.get("user_id") or "anonymous"
 
-    # created is {"ok": True, "key": record}
+    payload = {"mode": "quick", "user_id": user_id}
+    created = quick_key_create(app, payload)
     record = created.get("key", {})
 
-    # Ensure expiry fields exist (default 24h) and normalized types
     if not record.get("expires_at"):
         record["expires_at"] = time.time() + 24 * 3600
-    try:
-        record["expires_at"] = float(record["expires_at"])
-    except Exception:
-        record["expires_at"] = time.time() + 24 * 3600
-
-    # Ensure ISO companion for display
+    record["expires_at"] = float(record["expires_at"])
     record["expiry_iso"] = datetime.utcfromtimestamp(record["expires_at"]).isoformat()
 
-    # Remove any legacy "expiry" field if present
-    if "expiry" in record:
-        record.pop("expiry", None)
-
-    # Persist the normalized record back to store
     with _store_lock:
         _KEYS_STORE[record["key_id"]] = record
 
-    # Decide whether to return JSON or redirect
-    wants_json = (
-        request.is_json
-        or request.headers.get("X-Requested-With") == "XMLHttpRequest"
-        or "application/json" in (request.headers.get("Accept") or "")
-    )
+    # Render a simple HTML page showing the new key
+    return f"""
+    <html><body style="font-family:sans-serif;background:#111;color:#eee">
+      <h2>New Key Generated</h2>
+      <p><strong>Key:</strong> <code>{record.get('key_id')}</code></p>
+      <p><strong>Expires at:</strong> {record.get('expiry_iso')}</p>
+      <p>You can now return to <a href="/keys" style="color:#0ff">Key Management</a>.</p>
+    </body></html>
+    """
 
-    if wants_json:
-        return jsonify({
-            "ok": True,
-            "key": record,
-            "user_id": normalized["user_id"]
-        }), 200
-
-    return redirect("/keys")
 
 
 @app.route("/generate_key", methods=["POST"])
