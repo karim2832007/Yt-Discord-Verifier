@@ -478,8 +478,9 @@ def _get_key_from_store(key_id: str) -> Optional[dict]:
 @app.route("/validate_key/<path:key_to_validate>", methods=["GET"])
 @app.route("/validate_key/<did>/<path:key_to_validate>", methods=["GET"])
 def validate_key(key_to_validate=None, did=None):
-    """Validate a key and return requested fields.
-    Legacy mode: always returns ok, valid, message for Ren'Py client.
+    """
+    Validate a key and return full expiry information.
+    Always returns ok, valid, message, and expiry fields.
     """
     try:
         # Handle POST JSON body
@@ -539,22 +540,15 @@ def validate_key(key_to_validate=None, did=None):
                 "expires_in": int(rec_expires_at - now)
             }
 
-        # Legacy mode: Ren'Py client only needs ok/valid/message
-        if request.args.get("legacy") == "1" or request.headers.get("User-Agent") == "RenPy-Client":
-            return jsonify({
-                "ok": response["ok"],
-                "valid": response["valid"],
-                "message": response["message"]
-            }), 200
-
         # Filter response if fields=... is provided
         fields_param = request.args.get("fields")
         if fields_param:
             requested = {f.strip() for f in fields_param.split(",")}
             filtered = {k: v for k, v in response.items() if k in requested}
-            # Always include ok/valid for safety
+            # Always include ok/valid/message
             filtered.setdefault("ok", response["ok"])
             filtered.setdefault("valid", response["valid"])
+            filtered.setdefault("message", response["message"])
             return jsonify(filtered), 200
 
         # Default: full response
@@ -567,7 +561,6 @@ def validate_key(key_to_validate=None, did=None):
             "valid": False,
             "message": f"Server error: {type(e).__name__} - {str(e)}"
         }), 500
-
 
         
 
