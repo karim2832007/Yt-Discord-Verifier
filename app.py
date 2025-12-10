@@ -294,7 +294,6 @@ except Exception:
 _EXCHANGING_CODES = set()
 _codes_lock = threading.RLock()
 
-
 @app.route("/login/discord/callback")
 def login_discord_callback():
     error = request.args.get("error")
@@ -328,7 +327,13 @@ def login_discord_callback():
         _EXCHANGING_CODES.add(code)
 
     try:
-        token_json = exchange_token_with_backoff(token_url, data, headers)
+        # ✅ Cache check before exchange
+        cached = _cache_get(code)
+        if cached is not None:
+            token_json = cached
+        else:
+            token_json = exchange_token_with_backoff(token_url, data, headers)
+            _cache_put(code, token_json)
     finally:
         with _codes_lock:
             _EXCHANGING_CODES.discard(code)
@@ -354,7 +359,8 @@ def login_discord_callback():
     next_url = session.pop('next', None) or "https://gaming-mods.com/"
     return redirect(next_url)
 
-# top-level
+
+# top-level cache helpers
 _CODE_RESULT_CACHE = {}
 _CODE_CACHE_TTL = 120  # seconds
 
@@ -371,13 +377,6 @@ def _cache_get(code):
         return None
     return val
 
-# in login_discord_callback(), before exchange
-cached = _cache_get(code)
-if cached is not None:
-    token_json = cached
-else:
-    token_json = exchange_token_with_backoff(token_url, data, headers)
-    _cache_put(code, token_json)
 # --- In-memory stores -----------------------------------------------------
 _store_lock = threading.RLock()
 _KEYS_STORE = {}          # key_id -> record
