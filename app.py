@@ -115,7 +115,7 @@ def create_app(config: Optional[Config] = None) -> Flask:
                 rec.req_id = "-"
             return True
 
-    app.logger.addFilter(ReqIdFilter())
+    logger.addFilter(ReqIdFilter())
 
     # error handlers
     @app.errorhandler(400)
