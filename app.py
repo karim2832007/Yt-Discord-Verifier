@@ -152,13 +152,13 @@ def create_app(config: Optional[Config] = None) -> Flask:
 
 
 def exchange_token_with_backoff(token_url, data, headers):
-    # Single quick retry honoring Retry-After
     resp = requests.post(token_url, data=data, headers=headers, timeout=8)
     if resp.status_code == 429:
         retry_after = resp.headers.get("Retry-After")
         wait_s = int(retry_after) if retry_after and retry_after.isdigit() else 2
-        time.sleep(wait_s)
-        resp = requests.post(token_url, data=data, headers=headers, timeout=8)
+        # Instead of sleeping, just log and return an error
+        app.logger_custom.warning(f"Rate limited by Discord, retry_after={wait_s}")
+        return {"error": "rate_limited", "retry_after": wait_s}
     resp.raise_for_status()
     return resp.json()
 
