@@ -262,7 +262,11 @@ def burn_key(key_to_burn: str):
 def _register_exception_handlers(app: Flask):
     @app.errorhandler(ValidationError)
     def handle_validation(err):
-        app.logger_custom.warning(json.dumps({"event": "validation_error", "message": str(err), "errors": getattr(err, "errors", [])}))
+        app.logger_custom.warning(json.dumps({
+            "event": "validation_error",
+            "message": str(err),
+            "errors": getattr(err, "errors", [])
+        }))
         return jsonify({"ok": False, "error": "validation_error", "message": str(err)}), 400
 
     @app.errorhandler(AuthorizationError)
@@ -280,21 +284,70 @@ try:
     _register_exception_handlers(app)
 except Exception:
     pass
-# top-level in app.py
+
+# top-level guard for duplicate exchanges
 _EXCHANGING_CODES = set()
 _codes_lock = threading.RLock()
 
-# in login_discord_callback()
-with _codes_lock:
-    if code in _EXCHANGING_CODES:
-        return jsonify({'ok': False, 'error': 'duplicate_exchange', 'message': 'Code already being exchanged'}), 429
-    _EXCHANGING_CODES.add(code)
 
-try:
-    token_json = exchange_token_with_backoff(token_url, data, headers)
-finally:
+@app.route("/login/discord/callback")
+def login_discord_callback():
+    error = request.args.get("error")
+    if error:
+        return jsonify({'ok': False, 'error': 'oauth_error', 'message': error}), 400
+
+    code = request.args.get("code")
+    state = request.args.get("state")
+    saved_state = session.pop(OAUTH_STATE_KEY, None)
+    if not code or not state or saved_state != state:
+        return jsonify({'ok': False, 'error': 'invalid_state', 'message': 'State mismatch or missing code'}), 400
+
+    token_url = f"{app.cfg.DISCORD_API_BASE}/oauth2/token"
+    data = {
+        'client_id': app.cfg.DISCORD_CLIENT_ID,
+        'client_secret': app.cfg.DISCORD_CLIENT_SECRET,
+        'grant_type': 'authorization_code',
+        'code': code,
+        'redirect_uri': _build_redirect_uri(),
+    }
+    headers = {'Content-Type': 'application/x-www-form-urlencoded'}
+
+    # duplicate-exchange guard
     with _codes_lock:
-        _EXCHANGING_CODES.discard(code)
+        if code in _EXCHANGING_CODES:
+            return jsonify({
+                'ok': False,
+                'error': 'duplicate_exchange',
+                'message': 'Code already being exchanged'
+            }), 429
+        _EXCHANGING_CODES.add(code)
+
+    try:
+        token_json = exchange_token_with_backoff(token_url, data, headers)
+    finally:
+        with _codes_lock:
+            _EXCHANGING_CODES.discard(code)
+
+    access_token = token_json.get('access_token')
+    if not access_token:
+        return jsonify({'ok': False, 'error': 'no_access_token', 'message': token_json}), 502
+
+    try:
+        user_resp = requests.get(f"{app.cfg.DISCORD_API_BASE}/users/@me",
+                                 headers={'Authorization': f"Bearer {access_token}"}, timeout=8)
+        user_resp.raise_for_status()
+        user_json = user_resp.json()
+    except Exception as e:
+        app.logger_custom.exception("Discord user fetch failed")
+        return jsonify({'ok': False, 'error': 'user_fetch_failed', 'message': str(e)}), 502
+
+    # persist minimal user in session
+    user_id = user_json.get('id')
+    username = user_json.get('username')
+    session['user'] = {'id': str(user_id), 'username': username, 'raw': user_json}
+
+    next_url = session.pop('next', None) or "https://gaming-mods.com/"
+    return redirect(next_url)
 
 # top-level
 _CODE_RESULT_CACHE = {}
