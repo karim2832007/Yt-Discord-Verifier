@@ -71,6 +71,7 @@ def make_logger(name: str = "yt_discord_verifier", logfile: str = "") -> logging
 
 # --- Simple request-id middleware helpers ---------------------------------
 def get_request_id() -> str:
+    # Always return a request_id if present, otherwise generate a new one
     return getattr(g, "request_id", str(uuid.uuid4()))
 
 # --- Flask factory --------------------------------------------------------
@@ -100,10 +101,18 @@ def create_app(config: Optional[Config] = None) -> Flask:
         if request.method == 'OPTIONS':
             return make_response('', 200)
 
+    # ✅ Assign request_id for every request
+    @app.before_request
+    def assign_request_id():
+        g.request_id = str(uuid.uuid4())
+
     # ✅ Add request-id filter for logging
     class ReqIdFilter(logging.Filter):
         def filter(self, rec):
-            rec.req_id = getattr(g, "request_id", "-")
+            try:
+                rec.req_id = getattr(g, "request_id", "-")
+            except Exception:
+                rec.req_id = "-"
             return True
 
     app.logger.addFilter(ReqIdFilter())
@@ -133,7 +142,7 @@ def create_app(config: Optional[Config] = None) -> Flask:
             "ok": False,
             "error": "internal_error",
             "message": "internal server error",
-            "req_id": g.request_id
+            "req_id": get_request_id()
         }
         return jsonify(payload), 500
 
@@ -154,7 +163,6 @@ def exchange_token_with_backoff(token_url, data, headers):
 
 # module-level app for gunicorn
 app = create_app()
-
 
 # app.py  -- Part 2 of 4
 # Exceptions and validators
