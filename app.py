@@ -300,6 +300,10 @@ try:
 except Exception:
     pass
 
+def safe_token_exchange(token_url, data, headers):
+    return exchange_token_with_backoff(token_url, data, headers)
+
+
 # top-level guard for duplicate exchanges
 _EXCHANGING_CODES = set()
 _codes_lock = threading.RLock()
