@@ -106,7 +106,7 @@ class ReqIdFilter(logging.Filter):
         rec.req_id = getattr(g, "request_id", "-")
         return True
 
-logger.addFilter(ReqIdFilter())
+app.logger.addFilter(ReqIdFilter())
 
 # error handlers
 @app.errorhandler(400)
