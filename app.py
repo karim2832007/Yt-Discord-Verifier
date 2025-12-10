@@ -136,6 +136,17 @@ def create_app(config: Optional[Config] = None) -> Flask:
 
     return app
 
+def exchange_token_with_backoff(token_url, data, headers):
+    # Single quick retry honoring Retry-After
+    resp = requests.post(token_url, data=data, headers=headers, timeout=8)
+    if resp.status_code == 429:
+        retry_after = resp.headers.get("Retry-After")
+        wait_s = int(retry_after) if retry_after and retry_after.isdigit() else 2
+        time.sleep(wait_s)
+        resp = requests.post(token_url, data=data, headers=headers, timeout=8)
+    resp.raise_for_status()
+    return resp.json()
+
 # module-level app for gunicorn
 app = create_app()
 # app.py  -- Part 2 of 4
@@ -267,7 +278,46 @@ try:
     _register_exception_handlers(app)
 except Exception:
     pass
+# top-level in app.py
+_EXCHANGING_CODES = set()
+_codes_lock = threading.RLock()
 
+# in login_discord_callback()
+with _codes_lock:
+    if code in _EXCHANGING_CODES:
+        return jsonify({'ok': False, 'error': 'duplicate_exchange', 'message': 'Code already being exchanged'}), 429
+    _EXCHANGING_CODES.add(code)
+
+try:
+    token_json = exchange_token_with_backoff(token_url, data, headers)
+finally:
+    with _codes_lock:
+        _EXCHANGING_CODES.discard(code)
+
+# top-level
+_CODE_RESULT_CACHE = {}
+_CODE_CACHE_TTL = 120  # seconds
+
+def _cache_put(code, value):
+    _CODE_RESULT_CACHE[code] = (value, time.time())
+
+def _cache_get(code):
+    item = _CODE_RESULT_CACHE.get(code)
+    if not item:
+        return None
+    val, ts = item
+    if time.time() - ts > _CODE_CACHE_TTL:
+        _CODE_RESULT_CACHE.pop(code, None)
+        return None
+    return val
+
+# in login_discord_callback(), before exchange
+cached = _cache_get(code)
+if cached is not None:
+    token_json = cached
+else:
+    token_json = exchange_token_with_backoff(token_url, data, headers)
+    _cache_put(code, token_json)
 # --- In-memory stores -----------------------------------------------------
 _store_lock = threading.RLock()
 _KEYS_STORE = {}          # key_id -> record
@@ -827,11 +877,18 @@ def login_discord_callback():
     error = request.args.get("error")
     if error:
         return jsonify({'ok': False, 'error': 'oauth_error', 'message': error}), 400
+
     code = request.args.get("code")
     state = request.args.get("state")
     saved_state = session.pop(OAUTH_STATE_KEY, None)
     if not code or not state or saved_state != state:
         return jsonify({'ok': False, 'error': 'invalid_state', 'message': 'State mismatch or missing code'}), 400
+
+    # prevent duplicate exchanges for the same code
+    if code in _seen_codes:
+        return jsonify({'ok': False, 'error': 'duplicate_code', 'message': 'Code already used'}), 429
+    _seen_codes.add(code)
+
     token_url = f"{app.cfg.DISCORD_API_BASE}/oauth2/token"
     data = {
         'client_id': app.cfg.DISCORD_CLIENT_ID,
@@ -841,16 +898,17 @@ def login_discord_callback():
         'redirect_uri': _build_redirect_uri(),
     }
     headers = {'Content-Type': 'application/x-www-form-urlencoded'}
+
     try:
-        token_resp = requests.post(token_url, data=data, headers=headers, timeout=8)
-        token_resp.raise_for_status()
-        token_json = token_resp.json()
+        token_json = safe_token_exchange(token_url, data, headers)
     except Exception as e:
         app.logger_custom.exception("Discord token exchange failed")
         return jsonify({'ok': False, 'error': 'token_exchange_failed', 'message': str(e)}), 502
+
     access_token = token_json.get('access_token')
     if not access_token:
         return jsonify({'ok': False, 'error': 'no_access_token', 'message': token_json}), 502
+
     try:
         user_resp = requests.get(f"{app.cfg.DISCORD_API_BASE}/users/@me",
                                  headers={'Authorization': f"Bearer {access_token}"}, timeout=8)
@@ -859,13 +917,16 @@ def login_discord_callback():
     except Exception as e:
         app.logger_custom.exception("Discord user fetch failed")
         return jsonify({'ok': False, 'error': 'user_fetch_failed', 'message': str(e)}), 502
+
     # persist minimal user in session
     user_id = user_json.get('id')
     username = user_json.get('username')
     session['user'] = {'id': str(user_id), 'username': username, 'raw': user_json}
-    # redirect to configured frontend after successful login
+
     next_url = session.pop('next', None) or "https://gaming-mods.com/"
     return redirect(next_url)
+
+
 from functools import wraps
 from flask import request, jsonify, session, current_app, abort
 
