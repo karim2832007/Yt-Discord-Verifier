@@ -101,41 +101,43 @@ def create_app(config: Optional[Config] = None) -> Flask:
             return make_response('', 200)
 
     # ✅ Add request-id filter for logging
-class ReqIdFilter(logging.Filter):
-    def filter(self, rec):
-        rec.req_id = getattr(g, "request_id", "-")
-        return True
+    class ReqIdFilter(logging.Filter):
+        def filter(self, rec):
+            rec.req_id = getattr(g, "request_id", "-")
+            return True
 
-app.logger.addFilter(ReqIdFilter())
+    app.logger.addFilter(ReqIdFilter())
 
-# error handlers
-@app.errorhandler(400)
-def bad_request(err):
-    payload = {"ok": False, "error": "bad_request", "message": str(err)}
-    logger.warning(json.dumps({"event": "http.400", "message": str(err)}))
-    return jsonify(payload), 400
+    # error handlers
+    @app.errorhandler(400)
+    def bad_request(err):
+        payload = {"ok": False, "error": "bad_request", "message": str(err)}
+        logger.warning(json.dumps({"event": "http.400", "message": str(err)}))
+        return jsonify(payload), 400
 
-@app.errorhandler(404)
-def not_found(err):
-    payload = {"ok": False, "error": "not_found", "message": "not found"}
-    logger.warning(json.dumps({"event": "http.404", "path": request.path}))
-    return jsonify(payload), 404
+    @app.errorhandler(404)
+    def not_found(err):
+        payload = {"ok": False, "error": "not_found", "message": "not found"}
+        logger.warning(json.dumps({"event": "http.404", "path": request.path}))
+        return jsonify(payload), 404
 
-@app.errorhandler(Exception)
-def handle_exception(exc):
-    logger.exception(json.dumps({
-        "event": "exception",
-        "exception": repr(exc),
-        "path": request.path,
-        "method": request.method
-    }))
-    payload = {
-        "ok": False,
-        "error": "internal_error",
-        "message": "internal server error",
-        "req_id": g.request_id
-    }
-    return jsonify(payload), 500
+    @app.errorhandler(Exception)
+    def handle_exception(exc):
+        logger.exception(json.dumps({
+            "event": "exception",
+            "exception": repr(exc),
+            "path": request.path,
+            "method": request.method
+        }))
+        payload = {
+            "ok": False,
+            "error": "internal_error",
+            "message": "internal server error",
+            "req_id": g.request_id
+        }
+        return jsonify(payload), 500
+
+    return app
 
 
 def exchange_token_with_backoff(token_url, data, headers):
@@ -149,8 +151,11 @@ def exchange_token_with_backoff(token_url, data, headers):
     resp.raise_for_status()
     return resp.json()
 
+
 # module-level app for gunicorn
 app = create_app()
+
+
 # app.py  -- Part 2 of 4
 # Exceptions and validators
 class ValidationError(Exception):
