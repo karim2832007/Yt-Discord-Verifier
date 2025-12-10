@@ -1106,24 +1106,56 @@ def _health():
 def health_alias():
     return jsonify({"ok": True, "status": "healthy", "req_id": getattr(g, "request_id", None)}), 200
 
-@app.route('/__debug_me')
-def __debug_me():
-    return jsonify({
-        'ok': True,
-        'pid': os.getpid(),
-        'file': __file__,
-        'env': {
-            'DISCORD_CLIENT_ID': bool(os.getenv('DISCORD_CLIENT_ID')),
-            'DISCORD_CLIENT_SECRET': bool(os.getenv('DISCORD_CLIENT_SECRET')),
-            'DISCORD_REDIRECT': bool(os.getenv('DISCORD_REDIRECT'))
-        }
-    })
+import traceback
+import sys
 
-# ensure exception handlers registered at module import
-try:
-    _register_exception_handlers(app)
-except Exception:
-    pass
+@app.route("/__debug_me")
+def __debug_me():
+    # Collect environment variables of interest
+    env_info = {
+        "DISCORD_CLIENT_ID": os.getenv("DISCORD_CLIENT_ID"),
+        "DISCORD_CLIENT_SECRET": bool(os.getenv("DISCORD_CLIENT_SECRET")),  # don't expose secret
+        "DISCORD_REDIRECT": os.getenv("DISCORD_REDIRECT"),
+        "SECRET_KEY_set": bool(os.getenv("SECRET_KEY")),
+        "SESSION_COOKIE_DOMAIN": os.getenv("SESSION_COOKIE_DOMAIN"),
+    }
+
+    # Collect config snapshot
+    cfg = getattr(app, "cfg", None)
+    cfg_info = {}
+    if cfg:
+        cfg_info = {
+            "ENV": cfg.ENV,
+            "DEBUG": cfg.DEBUG,
+            "SECRET_KEY_set": bool(cfg.SECRET_KEY),
+            "SESSION_COOKIE_NAME": cfg.SESSION_COOKIE_NAME,
+            "SESSION_COOKIE_DOMAIN": cfg.SESSION_COOKIE_DOMAIN,
+            "SESSION_COOKIE_SECURE": cfg.SESSION_COOKIE_SECURE,
+            "SESSION_COOKIE_SAMESITE": cfg.SESSION_COOKIE_SAMESITE,
+        }
+
+    # Collect session info
+    session_info = dict(session)
+
+    # Collect last exception if any
+    exc_type, exc_value, exc_tb = sys.exc_info()
+    last_error = None
+    if exc_type:
+        last_error = {
+            "type": str(exc_type),
+            "value": str(exc_value),
+            "traceback": traceback.format_tb(exc_tb)
+        }
+
+    return jsonify({
+        "ok": True,
+        "pid": os.getpid(),
+        "file": __file__,
+        "env": env_info,
+        "config": cfg_info,
+        "session": session_info,
+        "last_error": last_error,
+    })
 
 @app.route("/")
 def index():
