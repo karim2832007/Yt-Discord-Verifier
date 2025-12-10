@@ -303,7 +303,7 @@ except Exception:
 # top-level guard for duplicate exchanges
 _EXCHANGING_CODES = set()
 _codes_lock = threading.RLock()
-# top-level cache helpers
+_seen_codes = set()
 _CODE_RESULT_CACHE = {}
 _CODE_CACHE_TTL = 120  # seconds
 
