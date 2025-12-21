@@ -16,6 +16,9 @@ import requests
 from urllib.parse import unquote_plus
 from flask import Flask, request, g, jsonify, session, redirect, url_for, make_response
 from flask_cors import CORS
+import mysql.connector
+from mysql.connector import Error
+
 # --- Config loader ---------------------------------------------------------
 class Config:
     def __init__(self):
@@ -165,6 +168,20 @@ def exchange_token_with_backoff(token_url, data, headers):
 
 # module-level app for gunicorn
 app = create_app()
+
+def get_db():
+    try:
+        connection = mysql.connector.connect(
+            host="db5019243018.hosting-data.io",
+            user="dbu2365342",
+            password="kmrykmry4",
+            database="dbs15097174",
+            port=3306
+        )
+        return connection
+    except Error as e:
+        print("Database connection error:", e)
+        return None
 
 # app.py  -- Part 2 of 4
 # Exceptions and validators
@@ -955,7 +972,7 @@ _KEYS = [
     {"key": "ABC123", "type": "global", "expiry": "2025-12-01", "owner": "User#1234", "status": "active"}
 ]
 _KEY_LOGS = ["Created key ABC123 for User#1234", "Revoked key XYZ789"]
-_PERKS = []
+_ADMIN_LOGS.append("Added perk X")
 
 # GET /admin/logs
 @app.route("/admin/logs", methods=["GET"])
@@ -971,62 +988,141 @@ def admin_add_perk():
     perk = data.get("perk")
     if not perk:
         return jsonify({"error": "missing perk"}), 400
-    _PERKS.append(perk)
-    _ADMIN_LOGS.append(f"Added perk {perk}")
+
+    # Insert perk into database
+    db = get_db()
+    cursor = db.cursor()
+    cursor.execute(
+        "INSERT INTO perks (name, description) VALUES (%s, %s)",
+        (perk, "")
+    )
+    db.commit()
+
+    # Log admin action in admin_logs table
+    admin_id = g.admin_id  # require_admin should set this
+    cursor.execute(
+        "INSERT INTO admin_logs (admin_id, action_type, details) VALUES (%s, %s, %s)",
+        (admin_id, "add_perk", f"Added perk {perk}")
+    )
+    db.commit()
+
     return jsonify({"status": "success", "action": f"Added perk {perk}"})
 
-# POST /admin/remove-perk
+
 @app.route("/admin/remove-perk", methods=["POST"])
 @require_admin
 def admin_remove_perk():
     data = request.get_json(silent=True) or {}
     perk = data.get("perk")
+
     if not perk:
         return jsonify({"error": "missing perk"}), 400
-    try:
-        _PERKS.remove(perk)
-    except ValueError:
+
+    db = get_db()
+    cursor = db.cursor()
+
+    # Check if perk exists
+    cursor.execute("SELECT id FROM perks WHERE name = %s", (perk,))
+    row = cursor.fetchone()
+    if not row:
         return jsonify({"error": "perk not found"}), 404
-    _ADMIN_LOGS.append(f"Removed perk {perk}")
+
+    perk_id = row[0]
+
+    # Remove perk
+    cursor.execute("DELETE FROM perks WHERE id = %s", (perk_id,))
+    db.commit()
+
+    # Log admin action
+    cursor.execute(
+        "INSERT INTO admin_logs (admin_id, action_type, details) VALUES (%s, %s, %s)",
+        (g.admin_id, "remove_perk", f"Removed perk {perk}")
+    )
+    db.commit()
+
     return jsonify({"status": "success", "action": f"Removed perk {perk}"})
 
-# POST /admin/ban-user
+
 @app.route("/admin/ban-user", methods=["POST"])
 @require_admin
 def admin_ban_user():
     data = request.get_json(silent=True) or {}
     user_id = data.get("user_id")
+
     if not user_id:
         return jsonify({"error": "missing user_id"}), 400
-    _ADMIN_LOGS.append(f"Banned user {user_id}")
-    # TODO: persist ban in DB
+
+    db = get_db()
+    cursor = db.cursor()
+
+    # Update banned flag
+    cursor.execute("UPDATE users SET banned = 1 WHERE id = %s", (user_id,))
+    db.commit()
+
+    # Log admin action
+    cursor.execute(
+        "INSERT INTO admin_logs (admin_id, action_type, details, target_user_id) VALUES (%s, %s, %s, %s)",
+        (g.admin_id, "ban_user", f"Banned user {user_id}", user_id)
+    )
+    db.commit()
+
     return jsonify({"status": "success", "action": f"Banned user {user_id}"})
 
-# POST /admin/unban-user
+
 @app.route("/admin/unban-user", methods=["POST"])
 @require_admin
 def admin_unban_user():
     data = request.get_json(silent=True) or {}
     user_id = data.get("user_id")
+
     if not user_id:
         return jsonify({"error": "missing user_id"}), 400
-    _ADMIN_LOGS.append(f"Unbanned user {user_id}")
-    # TODO: remove ban in DB
+
+    db = get_db()
+    cursor = db.cursor()
+
+    # Update banned flag
+    cursor.execute("UPDATE users SET banned = 0 WHERE id = %s", (user_id,))
+    db.commit()
+
+    # Log admin action
+    cursor.execute(
+        "INSERT INTO admin_logs (admin_id, action_type, details, target_user_id) VALUES (%s, %s, %s, %s)",
+        (g.admin_id, "unban_user", f"Unbanned user {user_id}", user_id)
+    )
+    db.commit()
+
     return jsonify({"status": "success", "action": f"Unbanned user {user_id}"})
 
-# GET /admin/users
+
 @app.route("/admin/users", methods=["GET"])
 @require_admin
 def admin_list_users():
-    return jsonify({"users": _USERS})
+    db = get_db()
+    cursor = db.cursor(dictionary=True)
 
-# GET /admin/stats
+    cursor.execute("SELECT id, email, username, discord_id, role, banned, age_verified, created_at FROM users")
+    users = cursor.fetchall()
+
+    return jsonify({"users": users})
+
 @app.route("/admin/stats", methods=["GET"])
 @require_admin
 def admin_stats():
+    db = get_db()
+    cursor = db.cursor()
+
+    # Count users
+    cursor.execute("SELECT COUNT(*) FROM users")
+    users_count = cursor.fetchone()[0]
+
+    # Count perks
+    cursor.execute("SELECT COUNT(*) FROM perks")
+    perks_count = cursor.fetchone()[0]
+
     return jsonify({
-        "active_users": len(_USERS),
-        "perks_count": len(_PERKS)
+        "active_users": users_count,
+        "perks_count": perks_count
     })
 
 # POST /admin/create-key
