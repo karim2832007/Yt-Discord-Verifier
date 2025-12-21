@@ -1253,6 +1253,49 @@ def __debug_me():
         "last_error": last_error,
     })
 
+import jwt
+from datetime import datetime, timedelta
+from flask import request, jsonify
+
+SECRET_KEY = "super_secure_admin_jwt_key_2832007_xA9!fL#pQ2@vZ7"
+
+@app.route("/admin/login", methods=["POST"])
+def admin_login():
+    data = request.get_json(silent=True) or {}
+    email = data.get("email")
+    password = data.get("password")
+
+    if not email or not password:
+        return jsonify({"error": "missing_fields"}), 400
+
+    db = get_db()
+    cursor = db.cursor(dictionary=True)
+    cursor.execute("SELECT * FROM users WHERE email = %s", (email,))
+    user = cursor.fetchone()
+
+    if not user:
+        return jsonify({"error": "not_found"}), 404
+
+    # TEMPORARY: plain-text password check
+    if user["password_hash"] != password:
+        return jsonify({"error": "invalid_password"}), 403
+
+    if user["role"] != "admin":
+        return jsonify({"error": "not_admin"}), 403
+
+    payload = {
+        "user_id": user["id"],
+        "role": "admin",
+        "exp": datetime.utcnow() + timedelta(hours=12)
+    }
+
+    token = jwt.encode(payload, SECRET_KEY, algorithm="HS256")
+
+    return jsonify({"token": token})
+
+
+
+
 @app.route("/")
 def index():
     return redirect("https://gaming-mods.com")
