@@ -1304,7 +1304,11 @@ def admin_login():
     if not email or not password:
         return jsonify({"error": "missing_fields"}), 400
 
+    # DEBUG: check if DB connection failed
     db = get_db()
+    if db is None:
+        return jsonify({"error": "db_connection_failed"}), 500
+
     cursor = db.cursor(dictionary=True)
     cursor.execute("SELECT * FROM users WHERE email = %s", (email,))
     user = cursor.fetchone()
@@ -1328,6 +1332,7 @@ def admin_login():
     token = jwt.encode(payload, SECRET_KEY, algorithm="HS256")
 
     return jsonify({"token": token})
+
 
 
 
