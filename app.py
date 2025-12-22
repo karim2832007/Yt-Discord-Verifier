@@ -81,6 +81,19 @@ def get_request_id() -> str:
 def create_app(config: Optional[Config] = None) -> Flask:
     cfg = config or Config()
     app = Flask(__name__)
+
+    # Enable CORS for your domains
+    CORS(app, resources={
+        r"/*": {
+            "origins": [
+                "https://gaming-mods.com",
+                "https://verifier.gaming-mods.com"
+            ],
+            "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+            "allow_headers": ["Content-Type", "Authorization"]
+        }
+    })
+
     app.config.from_mapping(
         SECRET_KEY=cfg.SECRET_KEY,
         DEBUG=cfg.DEBUG,
@@ -89,6 +102,7 @@ def create_app(config: Optional[Config] = None) -> Flask:
         SESSION_COOKIE_SECURE=cfg.SESSION_COOKIE_SECURE,
         SESSION_COOKIE_DOMAIN=cfg.SESSION_COOKIE_DOMAIN
     )
+
 
     # Attach config and logger
     app.cfg = cfg
