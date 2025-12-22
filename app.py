@@ -1,214 +1,231 @@
-# app.py  -- Part 1 of 4 (reworked, full-featured, drop-in)
-print("DEBUG: Running latest version")
+# app.py
+"""
+Full replacement Flask app:
+- Auth (signup/login/forgot/reset) with bcrypt + JWT
+- Admin decorator and admin endpoints
+- Key system (in-memory store) with create/validate/burn
+- create-key route (GET/POST), postback webhook
+- Discord OAuth minimal handlers (login + callback)
+- Health and debug endpoints
+- Robust DB handling and single CORS config
+"""
+
 import os
-import uuid
 import json
-import logging
-import re
+import uuid
 import time
+import secrets
+import string
+import logging
 import threading
 from logging.handlers import RotatingFileHandler
 from datetime import datetime, timedelta
+from functools import wraps
 from typing import Optional, Dict, Any
-import pytz
-import importlib
-import string, secrets
+
+from urllib.parse import urlencode, unquote_plus
 import requests
-from urllib.parse import unquote_plus
-from flask import Flask, request, g, jsonify, session, redirect, url_for, make_response
+
+from flask import Flask, request, jsonify, g, session, redirect, render_template, make_response
 from flask_cors import CORS
 import mysql.connector
-from mysql.connector import Error
+import bcrypt
+import jwt
 
-# --- Config loader ---------------------------------------------------------
-class Config:
-    def __init__(self):
-        self.ENV = os.getenv("FLASK_ENV", "production")
-        self.DEBUG = os.getenv("FLASK_DEBUG", "0") in ("1", "true", "True")
-        self.SECRET_KEY = os.getenv("SECRET_KEY", "change-me")
-        self.DISCORD_CLIENT_ID = os.getenv("DISCORD_CLIENT_ID", "")
-        self.DISCORD_CLIENT_SECRET = os.getenv("DISCORD_CLIENT_SECRET", "")
-        self.DISCORD_REDIRECT = os.getenv("DISCORD_REDIRECT", "/login/discord/callback")
-        self.DISCORD_API_BASE = os.getenv("DISCORD_API_BASE", "https://discord.com/api")
-        self.ADMIN_USER_IDS = self._parse_int_list(os.getenv("ADMIN_USER_IDS", ""))
-        self.ALLOW_CUSTOM_KEY = os.getenv("ALLOW_CUSTOM_KEY", "1") in ("1", "true", "True")
-        self.LOG_FILE = os.getenv("LOG_FILE", "")
-        self.GUNICORN_WORKERS = int(os.getenv("GUNICORN_WORKERS", "2"))
+# -------------------------
+# Configuration / Defaults
+# -------------------------
+SECRET_KEY = os.getenv("SECRET_KEY", "change-me-super-secret")
+MYSQL_HOST = os.getenv("MYSQL_HOST", "127.0.0.1")
+MYSQL_PORT = int(os.getenv("MYSQL_PORT", "3306"))
+MYSQL_USER = os.getenv("MYSQL_USER", "karim")
+MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD", "Kmrykmry@4!Strong")
+MYSQL_DB = os.getenv("MYSQL_DB", "verifier")
+ADMIN_USER_IDS = [int(x) for x in os.getenv("ADMIN_USER_IDS", "").split(",") if x.strip().isdigit()]
+CORS_ORIGINS = [
+    "https://gaming-mods.com",
+    "https://verifier.gaming-mods.com"
+]
+JWT_ALGO = "HS256"
+JWT_EXP_HOURS = int(os.getenv("JWT_EXP_HOURS", "12"))
+DEBUG = os.getenv("FLASK_DEBUG", "0").lower() in ("1", "true", "yes")
+LOG_FILE = os.getenv("LOG_FILE", "")
 
-        # ✅ Session cookie settings (indented inside __init__)
-        self.SESSION_COOKIE_NAME = os.getenv("SESSION_COOKIE_NAME", "gamingmods_session")
-        self.SESSION_COOKIE_SAMESITE = os.getenv("SESSION_COOKIE_SAMESITE", "Lax")
-        self.SESSION_COOKIE_SECURE = str(os.getenv("SESSION_COOKIE_SECURE", "1")).lower() in ("1", "true", "yes")
-        self.SESSION_COOKIE_DOMAIN = os.getenv("SESSION_COOKIE_DOMAIN", ".gaming-mods.com")
-        self.SESSION_COOKIE_HTTPONLY = True
+# Discord OAuth config (optional)
+DISCORD_CLIENT_ID = os.getenv("DISCORD_CLIENT_ID", "")
+DISCORD_CLIENT_SECRET = os.getenv("DISCORD_CLIENT_SECRET", "")
+DISCORD_REDIRECT = os.getenv("DISCORD_REDIRECT", "https://verifier.gaming-mods.com/login/discord/callback")
+DISCORD_API_BASE = os.getenv("DISCORD_API_BASE", "https://discord.com/api")
 
-    @staticmethod
-    def _parse_int_list(raw: str):
-        if not raw:
-            return []
-        return [int(x.strip()) for x in raw.split(",") if x.strip().isdigit()]
-
-# --- Logging setup --------------------------------------------------------
-def make_logger(name: str = "yt_discord_verifier", logfile: str = "") -> logging.Logger:
+# -------------------------
+# Logger (safe formatting)
+# -------------------------
+def make_logger(name: str = "verifier", logfile: str = "") -> logging.Logger:
     logger = logging.getLogger(name)
     if logger.handlers:
         return logger
-    cfg = Config()
-    logger.setLevel(logging.DEBUG if cfg.DEBUG else logging.INFO)
-    fmt = json.dumps({
-        "time": "%(asctime)s",
-        "level": "%(levelname)s",
-        "name": "%(name)s",
-        "req_id": "%(req_id)s",
-        "msg": "%(message)s"
-    })
-    formatter = logging.Formatter(fmt)
-    stream = logging.StreamHandler()
-    stream.setFormatter(formatter)
-    logger.addHandler(stream)
+    logger.setLevel(logging.DEBUG if DEBUG else logging.INFO)
+    fmt = '{"time":"%(asctime)s","level":"%(levelname)s","name":"%(name)s","req_id":"%(req_id)s","msg":"%(message)s"}'
+    class SafeFormatter(logging.Formatter):
+        def format(self, record):
+            if not hasattr(record, "req_id"):
+                record.req_id = "-"
+            return super().format(record)
+    formatter = SafeFormatter(fmt)
+    sh = logging.StreamHandler()
+    sh.setFormatter(formatter)
+    logger.addHandler(sh)
     if logfile:
-        file_handler = RotatingFileHandler(logfile, maxBytes=10_000_000, backupCount=3)
-        file_handler.setFormatter(formatter)
-        logger.addHandler(file_handler)
+        fh = RotatingFileHandler(logfile, maxBytes=10_000_000, backupCount=3)
+        fh.setFormatter(formatter)
+        logger.addHandler(fh)
     logger.propagate = False
     return logger
 
-# --- Simple request-id middleware helpers ---------------------------------
-def get_request_id() -> str:
-    # Always return a request_id if present, otherwise generate a new one
-    return getattr(g, "request_id", str(uuid.uuid4()))
+logger = make_logger("verifier", LOG_FILE)
 
-# --- Flask factory --------------------------------------------------------
-def create_app(config: Optional[Config] = None) -> Flask:
-    cfg = config or Config()
-    app = Flask(__name__)
-
-    # Enable CORS for your domains (ONLY this one — do NOT add another CORS() call)
-    CORS(app, resources={
-        r"/*": {
-            "origins": [
-                "https://gaming-mods.com",
-                "https://verifier.gaming-mods.com"
-            ],
-            "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-            "allow_headers": ["Content-Type", "Authorization"]
-        }
+# -------------------------
+# App factory
+# -------------------------
+def create_app() -> Flask:
+    app = Flask(__name__, static_folder=None)
+    app.config.update({
+        "SECRET_KEY": SECRET_KEY,
+        "DEBUG": DEBUG,
     })
 
-    app.config.from_mapping(
-        SECRET_KEY=cfg.SECRET_KEY,
-        DEBUG=cfg.DEBUG,
-        ENV=cfg.ENV,
-        SESSION_COOKIE_SAMESITE=cfg.SESSION_COOKIE_SAMESITE,
-        SESSION_COOKIE_SECURE=cfg.SESSION_COOKIE_SECURE,
-        SESSION_COOKIE_DOMAIN=cfg.SESSION_COOKIE_DOMAIN
-    )
+    # Single CORS call
+    CORS(app, resources={r"/*": {"origins": CORS_ORIGINS, "methods": ["GET","POST","PUT","DELETE","OPTIONS"], "allow_headers": ["Content-Type","Authorization"]}})
 
-    # Attach config and logger
-    app.cfg = cfg
-    logger = make_logger(logfile=cfg.LOG_FILE)
-    app.logger_custom = logger
-
-    return app
-
-
-    # ✅ Handle OPTIONS requests
-    @app.before_request
-    def handle_options():
-        if request.method == 'OPTIONS':
-            return make_response('', 200)
-
-    # ✅ Assign request_id for every request
+    # request id middleware
     @app.before_request
     def assign_request_id():
         g.request_id = str(uuid.uuid4())
 
-    # ✅ Add request-id filter for logging
+    # attach logger with req_id filter
     class ReqIdFilter(logging.Filter):
         def filter(self, rec):
-            try:
-                rec.req_id = getattr(g, "request_id", "-")
-            except Exception:
-                rec.req_id = "-"
+            rec.req_id = getattr(g, "request_id", "-")
             return True
-
     req_filter = ReqIdFilter()
     logger.addFilter(req_filter)
     app.logger.addFilter(req_filter)
+    app.logger_custom = logger
 
     # error handlers
     @app.errorhandler(400)
-    def bad_request(err):
-        payload = {"ok": False, "error": "bad_request", "message": str(err)}
-        logger.warning(json.dumps({"event": "http.400", "message": str(err)}))
-        return jsonify(payload), 400
+    def _bad_request(e):
+        logger.warning(json.dumps({"event":"http.400","path": request.path, "msg": str(e)}))
+        return jsonify({"ok": False, "error": "bad_request", "message": str(e)}), 400
 
     @app.errorhandler(404)
-    def not_found(err):
-        payload = {"ok": False, "error": "not_found", "message": "not found"}
-        logger.warning(json.dumps({"event": "http.404", "path": request.path}))
-        return jsonify(payload), 404
+    def _not_found(e):
+        logger.warning(json.dumps({"event":"http.404","path": request.path}))
+        return jsonify({"ok": False, "error": "not_found", "message": "not found"}), 404
 
     @app.errorhandler(Exception)
-    def handle_exception(exc):
-        logger.exception(json.dumps({
-            "event": "exception",
-            "exception": repr(exc),
-            "path": request.path,
-            "method": request.method
-        }))
-        payload = {
-            "ok": False,
-            "error": "internal_error",
-            "message": "internal server error",
-            "req_id": get_request_id()
-        }
-        return jsonify(payload), 500
+    def _handle_exc(e):
+        logger.exception(json.dumps({"event":"exception","path": request.path, "method": request.method, "exception": repr(e)}))
+        return jsonify({"ok": False, "error": "internal_error", "message": "internal server error", "req_id": getattr(g, "request_id", None)}), 500
 
     return app
 
-
-def exchange_token_with_backoff(token_url, data, headers):
-    resp = requests.post(token_url, data=data, headers=headers, timeout=8)
-    if resp.status_code == 429:
-        retry_after = resp.headers.get("Retry-After")
-        wait_s = int(retry_after) if retry_after and retry_after.isdigit() else 2
-        # Instead of sleeping, just log and return an error
-        app.logger_custom.warning(f"Rate limited by Discord, retry_after={wait_s}")
-        return {"error": "rate_limited", "retry_after": wait_s}
-    resp.raise_for_status()
-    return resp.json()
-
-
-# module-level app for gunicorn
 app = create_app()
 
+# -------------------------
+# DB helper (returns None on failure)
+# -------------------------
 def get_db():
     try:
-        connection = mysql.connector.connect(
-            host="82.165.136.190",
-            user="karim",
-            password="Kmrykmry@4!Strong",
-            database="verifier",
-            port=3306
+        conn = mysql.connector.connect(
+            host=os.getenv("MYSQL_HOST", MYSQL_HOST),
+            port=int(os.getenv("MYSQL_PORT", MYSQL_PORT)),
+            user=os.getenv("MYSQL_USER", MYSQL_USER),
+            password=os.getenv("MYSQL_PASSWORD", MYSQL_PASSWORD),
+            database=os.getenv("MYSQL_DB", MYSQL_DB),
+            connection_timeout=5,
         )
-
-        return connection
-    except Error as e:
-        print("Database connection error:", e)
+        return conn
+    except Exception as e:
+        try:
+            app.logger_custom.error(f"DB connect error: {e}")
+        except Exception:
+            print("DB connect error:", e)
         return None
 
-# app.py  -- Part 2 of 4
-# Exceptions and validators
+# -------------------------
+# Utilities
+# -------------------------
+def jwt_encode(payload: dict) -> str:
+    return jwt.encode(payload, SECRET_KEY, algorithm=JWT_ALGO)
+
+def jwt_decode(token: str) -> dict:
+    return jwt.decode(token, SECRET_KEY, algorithms=[JWT_ALGO])
+
+def hash_password(plain: str) -> str:
+    return bcrypt.hashpw(plain.encode(), bcrypt.gensalt()).decode()
+
+def check_password(plain: str, hashed: str) -> bool:
+    try:
+        return bcrypt.checkpw(plain.encode(), hashed.encode())
+    except Exception:
+        return plain == hashed
+
+def generate_random_key(length=10) -> str:
+    alphabet = string.ascii_letters + string.digits
+    return ''.join(secrets.choice(alphabet) for _ in range(length))
+
+# -------------------------
+# In-memory key store (thread-safe)
+# -------------------------
+_store_lock = threading.RLock()
+_KEYS_STORE: Dict[str, dict] = {}
+_OVERRIDES_AUDIT = []
+global_override = False
+admin_overrides = {}
+LEGACY_LIMIT_SECONDS = 3600
+
+# -------------------------
+# Decorators
+# -------------------------
+def require_admin(f):
+    @wraps(f)
+    def wrapped(*args, **kwargs):
+        auth = request.headers.get("Authorization", "")
+        if not auth or not auth.startswith("Bearer "):
+            return jsonify({"error": "missing_token"}), 403
+        token = auth.split(" ", 1)[1]
+        try:
+            payload = jwt_decode(token)
+        except Exception:
+            return jsonify({"error": "invalid_token"}), 403
+        user_id = payload.get("user_id")
+        if not user_id:
+            return jsonify({"error": "invalid_payload"}), 403
+        db = get_db()
+        if db is None:
+            return jsonify({"error": "db_connection_failed"}), 500
+        try:
+            cur = db.cursor(dictionary=True)
+            cur.execute("SELECT id, role FROM users WHERE id = %s", (user_id,))
+            user = cur.fetchone()
+        finally:
+            try: cur.close()
+            except: pass
+            try: db.close()
+            except: pass
+        if not user:
+            return jsonify({"error": "user_not_found"}), 403
+        if user.get("role") != "admin":
+            return jsonify({"error": "not_admin"}), 403
+        g.admin_id = user["id"]
+        return f(*args, **kwargs)
+    return wrapped
+
+# -------------------------
+# Validation helpers
+# -------------------------
 class ValidationError(Exception):
-    def __init__(self, message, errors=None):
-        super(ValidationError, self).__init__(message)
-        self.errors = errors or []
-
-class AuthorizationError(Exception):
-    pass
-
-class NotFoundError(Exception):
     pass
 
 def _ensure_str(value, name):
@@ -271,157 +288,52 @@ def validate_key_payload(data: dict) -> dict:
         "duration_minutes": duration_minutes
     }
 
-def validate_postback_payload(data: dict) -> dict:
-    if not isinstance(data, dict):
-        raise ValidationError("postback payload must be a JSON object")
-    tx_id = data.get("transaction_id") or data.get("tx") or data.get("id")
-    if tx_id is None:
-        tx_id = f"tx-{int(datetime.utcnow().timestamp())}"
-    tx_id = _ensure_str(str(tx_id), "transaction_id")
-    user_id_raw = data.get("user_id") or data.get("uid")
-    user_id = _ensure_str(str(user_id_raw), "user_id") if user_id_raw is not None else None
-    status = data.get("status", "unknown")
-    status = _ensure_str(status, "status")
-    metadata = data.get("metadata") or {}
-    if not isinstance(metadata, dict):
-        metadata = {"raw": str(metadata)}
-    return {
-        "transaction_id": tx_id,
-        "user_id": user_id,
-        "status": status,
-        "metadata": metadata
-    }
-
-def burn_key(key_to_burn: str):
-    """Internal helper: mark a key as revoked in the store."""
-    with _store_lock:
-        key_info = _KEYS_STORE.get(key_to_burn)
-        if key_info:
-            key_info["status"] = "revoked"
-            _KEYS_STORE[key_to_burn] = key_info
-            app.logger_custom.info(json.dumps({
-                "event": "key.burned",
-                "key_id": key_to_burn,
-                "user_id": key_info.get("user_id")
-            }))
-
-# register exception handlers
-def _register_exception_handlers(app: Flask):
-    @app.errorhandler(ValidationError)
-    def handle_validation(err):
-        app.logger_custom.warning(json.dumps({
-            "event": "validation_error",
-            "message": str(err),
-            "errors": getattr(err, "errors", [])
-        }))
-        return jsonify({"ok": False, "error": "validation_error", "message": str(err)}), 400
-
-    @app.errorhandler(AuthorizationError)
-    def handle_auth(err):
-        app.logger_custom.warning(json.dumps({"event": "auth_error", "message": str(err)}))
-        return jsonify({"ok": False, "error": "forbidden", "message": "not authorized"}), 403
-
-    @app.errorhandler(NotFoundError)
-    def handle_not_found(err):
-        app.logger_custom.warning(json.dumps({"event": "not_found", "message": str(err)}))
-        return jsonify({"ok": False, "error": "not_found", "message": str(err)}), 404
-
-# attempt register now (app exists)
-try:
-    _register_exception_handlers(app)
-except Exception:
-    pass
-
-def safe_token_exchange(token_url, data, headers):
-    return exchange_token_with_backoff(token_url, data, headers)
-
-
-# top-level guard for duplicate exchanges
-_EXCHANGING_CODES = set()
-_codes_lock = threading.RLock()
-_seen_codes = set()
-_CODE_RESULT_CACHE = {}
-_CODE_CACHE_TTL = 120  # seconds
-
-def _cache_put(code, value):
-    _CODE_RESULT_CACHE[code] = (value, time.time())
-
-def _cache_get(code):
-    item = _CODE_RESULT_CACHE.get(code)
-    if not item:
-        return None
-    val, ts = item
-    if time.time() - ts > _CODE_CACHE_TTL:
-        _CODE_RESULT_CACHE.pop(code, None)
-        return None
-    return val
-
-# --- In-memory stores -----------------------------------------------------
-_store_lock = threading.RLock()
-_KEYS_STORE = {}          # key_id -> record
-_OVERRIDES_AUDIT = []     # audit entries
-global_override = False
-admin_overrides = {}
-LEGACY_LIMIT_SECONDS = 3600
-def _generate_key_id() -> str:
-    return f"key_{int(time.time()*1000)}"
-
-# app.py  -- Part 3 of 4
-# Override resolution and key flows
+# -------------------------
+# Key flows
+# -------------------------
 class Override:
     def __init__(self, resolved_duration: Optional[int], role_id: Optional[str], applied_by_admin: bool):
         self.resolved_duration = resolved_duration
         self.role_id = role_id
         self.applied_by_admin = applied_by_admin
 
-def resolve_override(app: Flask, requester_id: str, requested_role: str, payload: dict) -> Override:
-    cfg = app.cfg
-    logger = app.logger_custom
-    mode = payload.get("mode", "quick")
-
-    # admin detection
+def resolve_override(app_obj, requester_id: str, requested_role: str, payload: dict) -> Override:
+    cfg_admin_ids = app_obj.cfg.ADMIN_USER_IDS if hasattr(app_obj, "cfg") else ADMIN_USER_IDS
     is_admin = False
     try:
         rid = int(str(requester_id))
-        is_admin = rid in cfg.ADMIN_USER_IDS
+        is_admin = rid in cfg_admin_ids
     except Exception:
         is_admin = False
 
     applied_by_admin = False
     resolved_duration = None
 
-    # admin override path
     if payload.get("admin_override", False):
         if not is_admin:
-            raise AuthorizationError("admin_override requested by non-admin")
+            raise ValidationError("admin_override requested by non-admin")
         applied_by_admin = True
         if payload.get("duration_minutes"):
             resolved_duration = int(payload["duration_minutes"])
 
-    # custom mode gating
-    if mode == "custom" and not cfg.ALLOW_CUSTOM_KEY and not applied_by_admin:
-        raise ValidationError("custom keys are disabled by server configuration")
-
-    # default duration resolution
     if resolved_duration is None:
-        if mode == "quick":
+        if payload.get("mode") == "quick":
             resolved_duration = 10
         else:
             resolved_duration = int(payload.get("duration_minutes") or 60)
 
-    # audit
     with _store_lock:
         _OVERRIDES_AUDIT.append({
             "timestamp": datetime.utcnow().isoformat(),
             "requester_id": requester_id,
             "requested_role": requested_role,
-            "mode": mode,
+            "mode": payload.get("mode"),
             "admin_override": bool(payload.get("admin_override", False)),
             "applied_by_admin": applied_by_admin,
             "resolved_duration": resolved_duration
         })
 
-    logger.info(json.dumps({
+    app.logger_custom.info(json.dumps({
         "event": "override.resolved",
         "requester_id": requester_id,
         "role": requested_role,
@@ -431,917 +343,516 @@ def resolve_override(app: Flask, requester_id: str, requested_role: str, payload
     return Override(resolved_duration=resolved_duration, role_id=requested_role, applied_by_admin=applied_by_admin)
 
 def _store_key_record(record: dict, key_id: Optional[str] = None) -> dict:
-    """Persist a key record into the in-memory store with thread-safety."""
     with _store_lock:
         if key_id:
             if key_id in _KEYS_STORE:
                 raise ValidationError("custom key string already exists")
             record["key_id"] = key_id
         else:
-            record["key_id"] = _generate_key_id()
-
-        # optional expiry passthrough: if caller provided ISO expiry, retain it
+            record["key_id"] = generate_random_key(10)
         record.setdefault("status", "active")
         record["created_at"] = datetime.utcnow().isoformat()
         _KEYS_STORE[record["key_id"]] = record
         return _KEYS_STORE[record["key_id"]]
 
-def generate_random_key(length=10) -> str:
-    """Generate a random alphanumeric key string of given length."""
-    alphabet = string.ascii_letters + string.digits
-    return ''.join(secrets.choice(alphabet) for _ in range(length))
-
-
-def quick_key_create(app: Flask, payload: dict) -> dict:
-    if payload.get("mode") != "quick":
-        raise ValidationError("quick_key_create called with non-quick mode")
-
+def quick_key_create(app_obj, payload: dict) -> dict:
     validated = validate_key_payload(payload)
-    override = resolve_override(app, validated["user_id"] or "anonymous",
-                                validated["role_id"], validated)
+    override = resolve_override(app_obj, validated["user_id"] or "anonymous", validated["role_id"], validated)
     duration = override.resolved_duration
-
     record = {
         "type": "quick",
         "user_id": validated["user_id"],
         "role_id": override.role_id,
         "duration_minutes": duration,
         "applied_by_admin": override.applied_by_admin,
-        "created_at": datetime.utcnow().isoformat(),
         "status": "active",
+        "created_at": datetime.utcnow().isoformat()
     }
-
-    # Always set expiry fields
-    record["expires_at"] = float(time.time() + 24 * 3600)  # epoch float
+    record["expires_at"] = float(time.time() + duration * 60)
     record["expiry_iso"] = datetime.utcfromtimestamp(record["expires_at"]).isoformat()
+    stored = _store_key_record(record)
+    app.logger_custom.info(json.dumps({"event":"key.created","key_id": stored["key_id"], "user_id": stored["user_id"]}))
+    return {"ok": True, "key": stored}
 
-    key_id = generate_random_key(10)
-    record["key_id"] = key_id
-
-    with _store_lock:
-        _KEYS_STORE[key_id] = record
-
-    app.logger_custom.info(json.dumps({
-        "event": "key.created",
-        "key_id": key_id,
-        "type": "quick",
-        "user_id": record["user_id"]
-    }))
-
-    return {"ok": True, "key": record}
-
-
-def custom_key_create(app: Flask, payload: dict) -> dict:
-    if payload.get("mode") != "custom":
-        raise ValidationError("custom_key_create called with non-custom mode")
-
+def custom_key_create(app_obj, payload: dict) -> dict:
     validated = validate_key_payload(payload)
-    override = resolve_override(app, validated["user_id"] or "anonymous",
-                                validated["role_id"], validated)
+    override = resolve_override(app_obj, validated["user_id"] or "anonymous", validated["role_id"], validated)
     duration = override.resolved_duration
     custom_key = payload.get("custom_key_string")
-
     base_record = {
         "type": "custom",
         "user_id": validated["user_id"],
         "role_id": override.role_id,
         "duration_minutes": duration,
         "applied_by_admin": override.applied_by_admin,
-        "created_at": datetime.utcnow().isoformat(),
         "status": "active",
+        "created_at": datetime.utcnow().isoformat()
     }
-
-    # Always set expiry fields
-    base_record["expires_at"] = float(time.time() + 24 * 3600)
+    base_record["expires_at"] = float(time.time() + duration * 60)
     base_record["expiry_iso"] = datetime.utcfromtimestamp(base_record["expires_at"]).isoformat()
-
     if custom_key is not None:
         if not override.applied_by_admin:
-            raise AuthorizationError("only admin may set custom key string")
-        if not re.match(r"^[A-Za-z0-9\-_]{4,64}$", custom_key):
-            raise ValidationError(
-                "custom_key_string invalid format; allowed A-Z a-z 0-9 - _ length 4-64"
-            )
+            raise ValidationError("only admin may set custom key string")
+        if not isinstance(custom_key, str) or not custom_key or len(custom_key) < 4:
+            raise ValidationError("custom_key_string invalid")
         stored = _store_key_record(base_record, key_id=custom_key)
     else:
         stored = _store_key_record(base_record)
-
-    app.logger_custom.info(json.dumps({
-        "event": "key.created",
-        "key_id": stored["key_id"],
-        "type": "custom",
-        "user_id": stored["user_id"]
-    }))
+    app.logger_custom.info(json.dumps({"event":"key.created","key_id": stored["key_id"], "user_id": stored["user_id"]}))
     return {"ok": True, "key": stored}
-
-
-
-
 
 def list_keys() -> list:
     with _store_lock:
         return list(_KEYS_STORE.values())
 
-def list_override_audit() -> list:
-    with _store_lock:
-        return list(_OVERRIDES_AUDIT)
-
-# app.py  -- Part 4 replacement
-# Routes, Discord OAuth handlers, and health/debug endpoints
-
-def _is_admin(app: Flask, user_id: str) -> bool:
-    try:
-        uid = int(str(user_id))
-        return uid in app.cfg.ADMIN_USER_IDS
-    except Exception:
-        return False
-
-def _get_key_from_store(key_id: str) -> Optional[dict]:
-    with _store_lock:
-        return _KEYS_STORE.get(key_id)
-
-
-
-@app.route("/validate_key", methods=["GET", "POST"])
-@app.route("/validate_key/<path:key_to_validate>", methods=["GET"])
-@app.route("/validate_key/<did>/<path:key_to_validate>", methods=["GET"])
-def validate_key(key_to_validate=None, did=None):
-    """
-    Validate a key and return full expiry information.
-    Always returns ok, valid, message, and expiry fields.
-    """
-    try:
-        # Handle POST JSON body
-        if request.method == "POST":
-            data = request.get_json(silent=True) or {}
-            key_to_validate = data.get("key")
-
-        # Handle GET with ?key=... or path segment
-        if request.method == "GET":
-            key_to_validate = key_to_validate or request.args.get("key")
-
-        if not key_to_validate:
-            return jsonify({"ok": False, "valid": False, "message": "No key provided"}), 400
-
-        key_to_validate = unquote_plus(str(key_to_validate)).strip()
-        now = time.time()
-
-        # Admin override path
-        if global_override or (did and admin_overrides.get(did)):
-            expires_at = float(now + LEGACY_LIMIT_SECONDS)
-            response = {
-                "ok": True,
-                "valid": True,
-                "message": "ADMIN OVERRIDE ACTIVE",
-                "expires_at": expires_at,
-                "expiry_iso": datetime.utcfromtimestamp(expires_at).isoformat(),
-                "expires_in": int(expires_at - now)
-            }
-        else:
-            # Lookup record
-            record = _get_key_from_store(key_to_validate)
-            if not record:
-                return jsonify({"ok": False, "valid": False, "message": "Invalid or unknown key"}), 400
-
-            try:
-                rec_expires_at = float(record.get("expires_at") or 0)
-            except Exception:
-                return jsonify({"ok": False, "valid": False, "message": "Malformed expiry"}), 500
-
-            # Expired key
-            if now > rec_expires_at:
-                try:
-                    burn_key(key_to_validate)
-                except Exception:
-                    app.logger.exception("burn_key failed")
-                return jsonify({"ok": False, "valid": False, "message": "Key expired"}), 410
-
-            status = record.get("status", "active")
-            valid = (status == "active")
-
-            response = {
-                "ok": True,
-                "valid": valid,
-                "message": "Key is valid" if valid else "Key is revoked",
-                "expires_at": rec_expires_at,
-                "expiry_iso": datetime.utcfromtimestamp(rec_expires_at).isoformat(),
-                "expires_in": int(rec_expires_at - now)
-            }
-
-        # Filter response if fields=... is provided
-        fields_param = request.args.get("fields")
-        if fields_param:
-            requested = {f.strip() for f in fields_param.split(",")}
-            filtered = {k: v for k, v in response.items() if k in requested}
-            # Always include ok/valid/message
-            filtered.setdefault("ok", response["ok"])
-            filtered.setdefault("valid", response["valid"])
-            filtered.setdefault("message", response["message"])
-            return jsonify(filtered), 200
-
-        # Default: full response
-        return jsonify(response), 200
-
-    except Exception as e:
-        app.logger.exception("Validation failed: %s", e)
-        return jsonify({
-            "ok": False,
-            "valid": False,
-            "message": f"Server error: {type(e).__name__} - {str(e)}"
-        }), 500
-
-        
-
-        
-@app.route("/keys/burn", methods=["POST"])
-def keys_burn():
-    """Public: burn (revoke) a key by ID."""
+# -------------------------
+# Routes: Auth
+# -------------------------
+@app.post("/auth/signup")
+def auth_signup():
     data = request.get_json(silent=True) or {}
-    key_to_burn = data.get("key")
-    if not key_to_burn:
-        return jsonify({"ok": False, "message": "No key provided"}), 400
-
-    with _store_lock:
-        key_info = _KEYS_STORE.get(key_to_burn)
-        if not key_info:
-            return jsonify({"ok": False, "message": "Key not found"}), 404
-
-        # Mark as revoked
-        key_info["status"] = "revoked"
-        _KEYS_STORE[key_to_burn] = key_info
-
-    app.logger_custom.info(json.dumps({
-        "event": "key.burned",
-        "key_id": key_to_burn,
-        "user_id": key_info.get("user_id")
-    }))
-
-    return jsonify({"ok": True, "message": f"Key {key_to_burn} burned"}), 200
-
-@app.route("/create-key", methods=["GET", "POST"])
-def create_key_route():
-    """Public: create a key.
-    - POST: JSON API for clients
-    - GET: browser flows (loot-link redirect) → auto redirect to public Keys page
-    """
-    if request.method == "POST":
-        payload = request.get_json(silent=True) or {}
-        try:
-            normalized = validate_key_payload(payload)
-        except ValidationError as e:
-            return jsonify({"ok": False, "error": str(e)}), 400
-
-        # Prefer the logged-in session user ID
-        if not normalized.get("user_id"):
-            if "user" in session and session["user"].get("id"):
-                normalized["user_id"] = str(session["user"]["id"])
-            else:
-                normalized["user_id"] = request.headers.get("X-User-Id") or "anonymous"
-
-        # Create the key
-        mode = normalized.get("mode", "quick")
-        if mode == "quick":
-            created = quick_key_create(app, normalized)
-        else:
-            created = custom_key_create(app, normalized)
-
-        record = created.get("key", {})
-
-        # Ensure expiry fields exist (default 24h)
-        if not record.get("expires_at"):
-            record["expires_at"] = time.time() + 24 * 3600
-        record["expires_at"] = float(record["expires_at"])
-        record["expiry_iso"] = datetime.utcfromtimestamp(record["expires_at"]).isoformat()
-        record.pop("expiry", None)
-
-        with _store_lock:
-            _KEYS_STORE[record["key_id"]] = record
-
-        wants_json = (
-            request.is_json
-            or request.headers.get("X-Requested-With") == "XMLHttpRequest"
-            or "application/json" in (request.headers.get("Accept") or "")
-        )
-
-        if wants_json:
-            return jsonify({
-                "ok": True,
-                "key": record,
-                "user_id": normalized["user_id"]
-            }), 200
-
-        # For non‑JSON POST, redirect to internal Keys page
-        return redirect("/keys")
-
-    # --- GET flow: generate quick key and redirect to public Keys page ---
-    user_id = None
-    if "user" in session and session["user"].get("id"):
-        user_id = str(session["user"]["id"])
-    else:
-        user_id = request.args.get("user_id") or "anonymous"
-
-    payload = {"mode": "quick", "user_id": user_id}
-    created = quick_key_create(app, payload)
-    record = created.get("key", {})
-
-    if not record.get("expires_at"):
-        record["expires_at"] = time.time() + 24 * 3600
-    record["expires_at"] = float(record["expires_at"])
-    record["expiry_iso"] = datetime.utcfromtimestamp(record["expires_at"]).isoformat()
-
-    with _store_lock:
-        _KEYS_STORE[record["key_id"]] = record
-
-    # Always redirect back to the public Keys page
-    return redirect("https://gaming-mods.com/keys.html")
-
-
-
-
-
-@app.route("/generate_key", methods=["POST"])
-def generate_key_alias():
-    return create_key_route()
-
-
-@app.route("/postback", methods=["POST"])
-def postback_route():
-    """Webhook: on completed transaction, auto-create a quick key for the user."""
-    payload = request.get_json(silent=True) or {}
-    validated = validate_postback_payload(payload)
-    app.logger_custom.info(json.dumps({
-        "event": "postback.received",
-        "tx": validated["transaction_id"],
-        "status": validated["status"]
-    }))
-
+    email = (data.get("email") or "").strip().lower()
+    password = data.get("password") or ""
+    if not email or not password:
+        return jsonify({"error": "missing_fields"}), 400
+    db = get_db()
+    if db is None:
+        return jsonify({"error": "db_connection_failed"}), 500
     try:
-        if validated["status"].lower() in ("completed", "success", "ok") and validated["user_id"]:
-            create_payload = {
-                "mode": "quick",
-                "user_id": validated["user_id"],
-                "role_id": validated["metadata"].get("role_id", "default_role"),
-                "admin_override": False
-            }
-            created = quick_key_create(app, create_payload)
+        cur = db.cursor(dictionary=True)
+        cur.execute("SELECT id FROM users WHERE email = %s", (email,))
+        if cur.fetchone():
+            return jsonify({"error": "email_exists"}), 409
+        pw_hash = hash_password(password)
+        cur.execute("INSERT INTO users (email, password_hash, role, created_at) VALUES (%s, %s, %s, %s)", (email, pw_hash, "user", datetime.utcnow()))
+        db.commit()
+        return jsonify({"ok": True}), 201
+    finally:
+        try: cur.close()
+        except: pass
+        try: db.close()
+        except: pass
 
-            # Normalize expiry fields post-creation to guarantee consistency
-            record = created.get("key", {})
-            if not record.get("expires_at"):
-                record["expires_at"] = time.time() + 24 * 3600
-            record["expires_at"] = float(record["expires_at"])
-            record["expiry_iso"] = datetime.utcfromtimestamp(record["expires_at"]).isoformat()
-            with _store_lock:
-                _KEYS_STORE[record["key_id"]] = record
-
-    except Exception as exc:
-        app.logger_custom.warning(json.dumps({
-            "event": "postback.processing_error",
-            "tx": validated["transaction_id"],
-            "error": repr(exc)
-        }))
-
-    return jsonify({"ok": True, "tx": validated["transaction_id"]}), 200
-
-
-@app.route("/admin/keys", methods=["GET"])
-def admin_list_keys():
-    user_id = request.headers.get("X-User-Id")
-    if not _is_admin(app, user_id):
-        raise AuthorizationError("not admin")
-    return jsonify({"ok": True, "keys": list_keys()}), 200
-
-
-@app.route("/admin/overrides", methods=["GET"])
-def admin_list_overrides():
-    user_id = request.headers.get("X-User-Id")
-    if not _is_admin(app, user_id):
-        raise AuthorizationError("not admin")
-    return jsonify({"ok": True, "overrides": list_override_audit()}), 200
-
-
-@app.route("/admin")
-def admin():
-    return render_template("admin.html")
-
-
-@app.route("/keys", methods=["GET"])
-def keys():
-    """Return all keys for the logged-in user as JSON."""
+@app.post("/auth/login")
+def auth_login():
+    data = request.get_json(silent=True) or {}
+    email = (data.get("email") or "").strip().lower()
+    password = data.get("password") or ""
+    if not email or not password:
+        return jsonify({"error": "missing_fields"}), 400
+    db = get_db()
+    if db is None:
+        return jsonify({"error": "db_connection_failed"}), 500
     try:
-        user = session.get("user")
+        cur = db.cursor(dictionary=True)
+        cur.execute("SELECT id, password_hash, role FROM users WHERE email = %s", (email,))
+        user = cur.fetchone()
         if not user:
-            return jsonify({"ok": False, "message": "Not authenticated"}), 401
+            return jsonify({"error": "not_found"}), 404
+        stored = user.get("password_hash") or ""
+        if not check_password(password, stored):
+            return jsonify({"error": "invalid_password"}), 403
+        payload = {"user_id": user["id"], "role": user.get("role", "user"), "exp": datetime.utcnow() + timedelta(hours=JWT_EXP_HOURS)}
+        token = jwt_encode(payload)
+        return jsonify({"token": token})
+    finally:
+        try: cur.close()
+        except: pass
+        try: db.close()
+        except: pass
 
-        user_id = str(user.get("id"))
-        with _store_lock:
-            user_keys = [
-                k for k in _KEYS_STORE.values()
-                if str(k.get("user_id")) == user_id
-            ]
-
-        formatted = []
-        now = time.time()
-        for k in user_keys:
-            status = k.get("status", "active")
-            expires_at = k.get("expires_at")  # float epoch
-            expiry_iso = k.get("expiry_iso")  # optional ISO string
-            expired = False
-
-            if expires_at is not None:
-                try:
-                    expired = now > float(expires_at)
-                except Exception as e:
-                    app.logger.warning(f"Expiry parse failed: {expires_at} ({e})")
-                    expired = False
-
-            valid = (status == "active" and not expired)
-
-            formatted.append({
-                "key_id": k.get("key_id"),
-                "type": k.get("type"),
-                "owner": k.get("user_id"),
-                "role_id": k.get("role_id"),
-                "created_at": k.get("created_at"),
-                "expires_at": expires_at,
-                "expiry_iso": expiry_iso,
-                "status": status,
-                "valid": valid,
-                "message": "Key is valid" if valid else "Key is revoked or expired",
-                "actions": {
-                    "copy_hint": f"POST /validate_key {{'key':'{k.get('key_id')}'}}",
-                    "burn_hint": f"POST /keys/burn {{'key':'{k.get('key_id')}'}}"
-                }
-            })
-
-        return jsonify({
-            "ok": True,
-            "user_id": user_id,
-            "keys": formatted
-        }), 200
-
-    except Exception as e:
-        app.logger.exception(f"Failed to list keys: {e}")
-        return jsonify({"ok": False, "message": "Server error"}), 500
-
-
-
-# --- Discord OAuth2 login flow kept minimal and consistent with frontend expectations
-OAUTH_STATE_KEY = "oauth2_state"
-
-def _build_redirect_uri():
-    base = os.getenv("BASE_URL") or request.url_root.rstrip('/')
-    path = app.cfg.DISCORD_REDIRECT
-    if path.startswith("http"):
-        return path
-    return base + path
-
-@app.route("/login/discord")
-def login_discord():
-    state = uuid.uuid4().hex
-    session[OAUTH_STATE_KEY] = state
-    params = {
-        "client_id": app.cfg.DISCORD_CLIENT_ID,
-        "redirect_uri": _build_redirect_uri(),
-        "response_type": "code",
-        "scope": "identify email",
-        "state": state,
-    }
-    url = f"{app.cfg.DISCORD_API_BASE}/oauth2/authorize?" + "&".join([f"{k}={requests.utils.requote_uri(str(v))}" for k, v in params.items()])
-    return redirect(url)
-
-@app.route("/login/discord/callback")
-def login_discord_callback():
-    error = request.args.get("error")
-    if error:
-        return jsonify({'ok': False, 'error': 'oauth_error', 'message': error}), 400
-
-    code = request.args.get("code")
-    state = request.args.get("state")
-    saved_state = session.pop(OAUTH_STATE_KEY, None)
-    if not code or not state or saved_state != state:
-        return jsonify({'ok': False, 'error': 'invalid_state', 'message': 'State mismatch or missing code'}), 400
-
-    # prevent duplicate exchanges for the same code
-    if code in _seen_codes:
-        return jsonify({'ok': False, 'error': 'duplicate_code', 'message': 'Code already used'}), 429
-    _seen_codes.add(code)
-
-    token_url = f"{app.cfg.DISCORD_API_BASE}/oauth2/token"
-    data = {
-        'client_id': app.cfg.DISCORD_CLIENT_ID,
-        'client_secret': app.cfg.DISCORD_CLIENT_SECRET,
-        'grant_type': 'authorization_code',
-        'code': code,
-        'redirect_uri': _build_redirect_uri(),
-    }
-    headers = {'Content-Type': 'application/x-www-form-urlencoded'}
-
+@app.post("/auth/forgot")
+def auth_forgot():
+    data = request.get_json(silent=True) or {}
+    email = (data.get("email") or "").strip().lower()
+    if not email:
+        return jsonify({"error": "missing_email"}), 400
+    db = get_db()
+    if db is None:
+        return jsonify({"error": "db_connection_failed"}), 500
     try:
-        token_json = safe_token_exchange(token_url, data, headers)
-    except Exception as e:
-        app.logger_custom.exception("Discord token exchange failed")
-        return jsonify({'ok': False, 'error': 'token_exchange_failed', 'message': str(e)}), 502
-
-    access_token = token_json.get('access_token')
-    if not access_token:
-        return jsonify({'ok': False, 'error': 'no_access_token', 'message': token_json}), 502
-
-    try:
-        user_resp = requests.get(f"{app.cfg.DISCORD_API_BASE}/users/@me",
-                                 headers={'Authorization': f"Bearer {access_token}"}, timeout=8)
-        user_resp.raise_for_status()
-        user_json = user_resp.json()
-    except Exception as e:
-        app.logger_custom.exception("Discord user fetch failed")
-        return jsonify({'ok': False, 'error': 'user_fetch_failed', 'message': str(e)}), 502
-
-    # persist minimal user in session
-    user_id = user_json.get('id')
-    username = user_json.get('username')
-    session['user'] = {'id': str(user_id), 'username': username, 'raw': user_json}
-
-    next_url = session.pop('next', None) or "https://gaming-mods.com/"
-    return redirect(next_url)
-
-
-from functools import wraps
-from flask import request, jsonify, g
-import jwt
-
-SECRET_KEY = "super_secure_admin_jwt_key_2832007_xA9!fL#pQ2@vZ7"  # keep same as admin_login
-
-def require_admin(f):
-    @wraps(f)
-    def wrapped(*args, **kwargs):
-        auth = request.headers.get("Authorization", "")
-        if not auth.startswith("Bearer "):
-            return jsonify({"error": "missing_token"}), 403
-
-        token = auth.split(" ", 1)[1]
-
-        try:
-            payload = jwt.decode(token, SECRET_KEY, algorithms=["HS256"])
-        except Exception:
-            return jsonify({"error": "invalid_token"}), 403
-
-        user_id = payload.get("user_id")
-        if not user_id:
-            return jsonify({"error": "invalid_payload"}), 403
-
-        db = get_db()
-        cursor = db.cursor(dictionary=True)
-        cursor.execute("SELECT id, role FROM users WHERE id = %s", (user_id,))
-        user = cursor.fetchone()
-
+        cur = db.cursor(dictionary=True)
+        cur.execute("SELECT id FROM users WHERE email = %s", (email,))
+        user = cur.fetchone()
         if not user:
-            return jsonify({"error": "user_not_found"}), 403
+            return jsonify({"ok": True})
+        token = secrets.token_urlsafe(32)
+        expires = datetime.utcnow() + timedelta(hours=1)
+        cur.execute("UPDATE users SET reset_token=%s, reset_expires=%s WHERE id = %s", (token, expires, user["id"]))
+        db.commit()
+        app.logger_custom.info(json.dumps({"event":"password.reset.requested","email": email}))
+        print("RESET LINK:", f"https://gaming-mods.com/reset?token={token}")
+        return jsonify({"ok": True})
+    finally:
+        try: cur.close()
+        except: pass
+        try: db.close()
+        except: pass
 
-        if user["role"] != "admin":
-            return jsonify({"error": "not_admin"}), 403
+@app.post("/auth/reset")
+def auth_reset():
+    data = request.get_json(silent=True) or {}
+    token = data.get("token")
+    new_password = data.get("password")
+    if not token or not new_password:
+        return jsonify({"error": "missing_fields"}), 400
+    db = get_db()
+    if db is None:
+        return jsonify({"error": "db_connection_failed"}), 500
+    try:
+        cur = db.cursor(dictionary=True)
+        cur.execute("SELECT id FROM users WHERE reset_token = %s AND reset_expires > NOW()", (token,))
+        user = cur.fetchone()
+        if not user:
+            return jsonify({"error": "invalid_token"}), 400
+        pw_hash = hash_password(new_password)
+        cur.execute("UPDATE users SET password_hash=%s, reset_token=NULL, reset_expires=NULL WHERE id=%s", (pw_hash, user["id"]))
+        db.commit()
+        return jsonify({"ok": True})
+    finally:
+        try: cur.close()
+        except: pass
+        try: db.close()
+        except: pass
 
-        # used by /admin/add-perk, /admin/ban-user, etc.
-        g.admin_id = user["id"]
+# -------------------------
+# Portal /me (detect admin)
+# -------------------------
+@app.get("/portal/me")
+def portal_me():
+    auth = request.headers.get("Authorization", "")
+    if not auth or not auth.startswith("Bearer "):
+        return jsonify({"error": "missing_token"}), 401
+    token = auth.split(" ", 1)[1]
+    try:
+        payload = jwt_decode(token)
+    except Exception:
+        return jsonify({"error": "invalid_token"}), 401
+    user_id = payload.get("user_id")
+    if not user_id:
+        return jsonify({"error": "invalid_payload"}), 401
+    db = get_db()
+    if db is None:
+        return jsonify({"error": "db_connection_failed"}), 500
+    try:
+        cur = db.cursor(dictionary=True)
+        cur.execute("SELECT id, email, username, role FROM users WHERE id = %s", (user_id,))
+        user = cur.fetchone()
+        if not user:
+            return jsonify({"error": "user_not_found"}), 404
+        user["is_admin"] = (user.get("role") == "admin")
+        return jsonify({"ok": True, "user": user})
+    finally:
+        try: cur.close()
+        except: pass
+        try: db.close()
+        except: pass
 
-        return f(*args, **kwargs)
-    return wrapped
-
-
-# In-memory placeholders (swap for DB / persistent store)
-_ADMIN_LOGS = ["System started", "Waiting for actions..."]
-_USERS = [{"id": "123", "name": "TestUser"}]
-_KEYS = [
-    {"key": "ABC123", "type": "global", "expiry": "2025-12-01", "owner": "User#1234", "status": "active"}
-]
-_KEY_LOGS = ["Created key ABC123 for User#1234", "Revoked key XYZ789"]
-_ADMIN_LOGS.append("Added perk X")
-
-# GET /admin/logs
-@app.route("/admin/logs", methods=["GET"])
+# -------------------------
+# Admin endpoints (examples)
+# -------------------------
+@app.get("/admin/logs")
 @require_admin
-def admin_logs_view():
-    return jsonify({"logs": _ADMIN_LOGS})
+def admin_logs():
+    return jsonify({"logs": _OVERRIDES_AUDIT[-200:]}), 200
 
-# POST /admin/add-perk
-@app.route("/admin/add-perk", methods=["POST"])
+@app.post("/admin/add-perk")
 @require_admin
 def admin_add_perk():
     data = request.get_json(silent=True) or {}
     perk = data.get("perk")
     if not perk:
-        return jsonify({"error": "missing perk"}), 400
-
-    # Insert perk into database
+        return jsonify({"error": "missing_perk"}), 400
     db = get_db()
-    cursor = db.cursor()
-    cursor.execute(
-        "INSERT INTO perks (name, description) VALUES (%s, %s)",
-        (perk, "")
-    )
-    db.commit()
+    if db is None:
+        return jsonify({"error": "db_connection_failed"}), 500
+    try:
+        cur = db.cursor()
+        cur.execute("INSERT INTO perks (name, description) VALUES (%s, %s)", (perk, ""))
+        db.commit()
+        cur.execute("INSERT INTO admin_logs (admin_id, action_type, details) VALUES (%s, %s, %s)", (g.admin_id, "add_perk", f"Added perk {perk}"))
+        db.commit()
+        return jsonify({"status": "success", "action": f"Added perk {perk}"})
+    finally:
+        try: cur.close()
+        except: pass
+        try: db.close()
+        except: pass
 
-    # Log admin action in admin_logs table
-    admin_id = g.admin_id  # require_admin should set this
-    cursor.execute(
-        "INSERT INTO admin_logs (admin_id, action_type, details) VALUES (%s, %s, %s)",
-        (admin_id, "add_perk", f"Added perk {perk}")
-    )
-    db.commit()
-
-    return jsonify({"status": "success", "action": f"Added perk {perk}"})
-
-
-@app.route("/admin/remove-perk", methods=["POST"])
+@app.post("/admin/remove-perk")
 @require_admin
 def admin_remove_perk():
     data = request.get_json(silent=True) or {}
     perk = data.get("perk")
-
     if not perk:
-        return jsonify({"error": "missing perk"}), 400
-
+        return jsonify({"error": "missing_perk"}), 400
     db = get_db()
-    cursor = db.cursor()
+    if db is None:
+        return jsonify({"error": "db_connection_failed"}), 500
+    try:
+        cur = db.cursor(dictionary=True)
+        cur.execute("SELECT id FROM perks WHERE name = %s", (perk,))
+        row = cur.fetchone()
+        if not row:
+            return jsonify({"error": "perk_not_found"}), 404
+        perk_id = row["id"]
+        cur2 = db.cursor()
+        cur2.execute("DELETE FROM perks WHERE id = %s", (perk_id,))
+        db.commit()
+        cur2.execute("INSERT INTO admin_logs (admin_id, action_type, details) VALUES (%s, %s, %s)", (g.admin_id, "remove_perk", f"Removed perk {perk}"))
+        db.commit()
+        return jsonify({"status": "success", "action": f"Removed perk {perk}"})
+    finally:
+        try: cur.close()
+        except: pass
+        try: cur2.close()
+        except: pass
+        try: db.close()
+        except: pass
 
-    # Check if perk exists
-    cursor.execute("SELECT id FROM perks WHERE name = %s", (perk,))
-    row = cursor.fetchone()
-    if not row:
-        return jsonify({"error": "perk not found"}), 404
-
-    perk_id = row[0]
-
-    # Remove perk
-    cursor.execute("DELETE FROM perks WHERE id = %s", (perk_id,))
-    db.commit()
-
-    # Log admin action
-    cursor.execute(
-        "INSERT INTO admin_logs (admin_id, action_type, details) VALUES (%s, %s, %s)",
-        (g.admin_id, "remove_perk", f"Removed perk {perk}")
-    )
-    db.commit()
-
-    return jsonify({"status": "success", "action": f"Removed perk {perk}"})
-
-
-@app.route("/admin/ban-user", methods=["POST"])
+@app.post("/admin/ban-user")
 @require_admin
 def admin_ban_user():
     data = request.get_json(silent=True) or {}
     user_id = data.get("user_id")
-
     if not user_id:
-        return jsonify({"error": "missing user_id"}), 400
-
-    db = get_db()
-    cursor = db.cursor()
-
-    # Update banned flag
-    cursor.execute("UPDATE users SET banned = 1 WHERE id = %s", (user_id,))
-    db.commit()
-
-    # Log admin action
-    cursor.execute(
-        "INSERT INTO admin_logs (admin_id, action_type, details, target_user_id) VALUES (%s, %s, %s, %s)",
-        (g.admin_id, "ban_user", f"Banned user {user_id}", user_id)
-    )
-    db.commit()
-
-    return jsonify({"status": "success", "action": f"Banned user {user_id}"})
-
-
-@app.route("/admin/unban-user", methods=["POST"])
-@require_admin
-def admin_unban_user():
-    data = request.get_json(silent=True) or {}
-    user_id = data.get("user_id")
-
-    if not user_id:
-        return jsonify({"error": "missing user_id"}), 400
-
-    db = get_db()
-    cursor = db.cursor()
-
-    # Update banned flag
-    cursor.execute("UPDATE users SET banned = 0 WHERE id = %s", (user_id,))
-    db.commit()
-
-    # Log admin action
-    cursor.execute(
-        "INSERT INTO admin_logs (admin_id, action_type, details, target_user_id) VALUES (%s, %s, %s, %s)",
-        (g.admin_id, "unban_user", f"Unbanned user {user_id}", user_id)
-    )
-    db.commit()
-
-    return jsonify({"status": "success", "action": f"Unbanned user {user_id}"})
-
-
-@app.route("/admin/users", methods=["GET"])
-@require_admin
-def admin_list_users():
-    db = get_db()
-    cursor = db.cursor(dictionary=True)
-
-    cursor.execute("SELECT id, email, username, discord_id, role, banned, age_verified, created_at FROM users")
-    users = cursor.fetchall()
-
-    return jsonify({"users": users})
-
-@app.route("/admin/stats", methods=["GET"])
-@require_admin
-def admin_stats():
-    db = get_db()
-    cursor = db.cursor()
-
-    # Count users
-    cursor.execute("SELECT COUNT(*) FROM users")
-    users_count = cursor.fetchone()[0]
-
-    # Count perks
-    cursor.execute("SELECT COUNT(*) FROM perks")
-    perks_count = cursor.fetchone()[0]
-
-    return jsonify({
-        "active_users": users_count,
-        "perks_count": perks_count
-    })
-
-# POST /admin/create-key
-@app.route("/admin/create-key", methods=["POST"])
-@require_admin
-def admin_create_key():
-    data = request.get_json(silent=True) or {}
-    ktype = data.get("type", "one-time")
-    custom = data.get("custom_key")
-    expiry = data.get("expiry")
-    owner = data.get("owner", "unknown")
-    new_key = {
-        "key": custom or f"KEY{len(_KEYS)+1:04d}",
-        "type": ktype,
-        "expiry": expiry or "",
-        "owner": owner,
-        "status": "active"
-    }
-    _KEYS.append(new_key)
-    _KEY_LOGS.append(f"Created key {new_key['key']} for {owner}")
-    return jsonify({"status": "success", "key": new_key})
-
-# POST /admin/revoke-key
-@app.route("/admin/revoke-key", methods=["POST"])
-@require_admin
-def admin_revoke_key():
-    data = request.get_json(silent=True) or {}
-    key = data.get("key")
-    if not key:
-        return jsonify({"error": "missing key"}), 400
-    found = next((k for k in _KEYS if k["key"] == key), None)
-    if not found:
-        return jsonify({"error": "not found"}), 404
-    found["status"] = "revoked"
-    _KEY_LOGS.append(f"Revoked key {key}")
-    return jsonify({"status": "revoked", "key": key})
-
-# GET /admin/key-logs
-@app.route("/admin/key-logs", methods=["GET"])
-@require_admin
-def admin_key_logs():
-    return jsonify({"logs": _KEY_LOGS})
-
-@app.route("/portal/me", methods=["GET"])
-def portal_me():
-    user = session.get('user')
-    if not user:
-        return jsonify({'ok': False, 'message': 'not authenticated'}), 401
-    return jsonify({'ok': True, 'user': {'id': str(user.get('id')), 'username': user.get('username')}})
-
-@app.route("/delete-key/<key_id>", methods=["DELETE"])
-def delete_key(key_id):
-    """Delete (burn) a key permanently by ID."""
-    with _store_lock:
-        key_info = _KEYS_STORE.get(key_id)
-        if not key_info:
-            return jsonify({"ok": False, "message": "Key not found"}), 404
-
-        # Mark as revoked and remove from store
-        key_info["status"] = "revoked"
-        _KEYS_STORE.pop(key_id, None)
-
-    app.logger_custom.info(json.dumps({
-        "event": "key.deleted",
-        "key_id": key_id,
-        "user_id": key_info.get("user_id")
-    }))
-
-    return jsonify({"ok": True, "message": f"Key {key_id} deleted"}), 200
-
-# health and debug
-@app.route("/_health", methods=["GET"])
-def _health():
-    return jsonify({"ok": True, "status": "healthy", "req_id": getattr(g, "request_id", None)}), 200
-
-@app.route("/health", methods=["GET"])
-def health_alias():
-    return jsonify({"ok": True, "status": "healthy", "req_id": getattr(g, "request_id", None)}), 200
-
-import traceback
-import sys
-
-@app.route("/__debug_me")
-def __debug_me():
-    # Collect environment variables of interest
-    env_info = {
-        "DISCORD_CLIENT_ID": os.getenv("DISCORD_CLIENT_ID"),
-        "DISCORD_CLIENT_SECRET": bool(os.getenv("DISCORD_CLIENT_SECRET")),  # don't expose secret
-        "DISCORD_REDIRECT": os.getenv("DISCORD_REDIRECT"),
-        "SECRET_KEY_set": bool(os.getenv("SECRET_KEY")),
-        "SESSION_COOKIE_DOMAIN": os.getenv("SESSION_COOKIE_DOMAIN"),
-    }
-
-    # Collect config snapshot
-    cfg = getattr(app, "cfg", None)
-    cfg_info = {}
-    if cfg:
-        cfg_info = {
-            "ENV": cfg.ENV,
-            "DEBUG": cfg.DEBUG,
-            "SECRET_KEY_set": bool(cfg.SECRET_KEY),
-            "SESSION_COOKIE_NAME": cfg.SESSION_COOKIE_NAME,
-            "SESSION_COOKIE_DOMAIN": cfg.SESSION_COOKIE_DOMAIN,
-            "SESSION_COOKIE_SECURE": cfg.SESSION_COOKIE_SECURE,
-            "SESSION_COOKIE_SAMESITE": cfg.SESSION_COOKIE_SAMESITE,
-        }
-
-    # Collect session info
-    session_info = dict(session)
-
-    # Collect last exception if any
-    exc_type, exc_value, exc_tb = sys.exc_info()
-    last_error = None
-    if exc_type:
-        last_error = {
-            "type": str(exc_type),
-            "value": str(exc_value),
-            "traceback": traceback.format_tb(exc_tb)
-        }
-
-    return jsonify({
-        "ok": True,
-        "pid": os.getpid(),
-        "file": __file__,
-        "env": env_info,
-        "config": cfg_info,
-        "session": session_info,
-        "last_error": last_error,
-    })
-
-
-@app.route("/admin/login", methods=["POST"])
-def admin_login():
-    data = request.get_json(silent=True) or {}
-    email = data.get("email")
-    password = data.get("password")
-
-    if not email or not password:
-        return jsonify({"error": "missing_fields"}), 400
-
-    # DEBUG: check if DB connection failed
+        return jsonify({"error": "missing_user_id"}), 400
     db = get_db()
     if db is None:
         return jsonify({"error": "db_connection_failed"}), 500
+    try:
+        cur = db.cursor()
+        cur.execute("UPDATE users SET banned = 1 WHERE id = %s", (user_id,))
+        db.commit()
+        cur.execute("INSERT INTO admin_logs (admin_id, action_type, details, target_user_id) VALUES (%s, %s, %s, %s)", (g.admin_id, "ban_user", f"Banned user {user_id}", user_id))
+        db.commit()
+        return jsonify({"status": "success", "action": f"Banned user {user_id}"})
+    finally:
+        try: cur.close()
+        except: pass
+        try: db.close()
+        except: pass
 
-    cursor = db.cursor(dictionary=True)
-    cursor.execute("SELECT * FROM users WHERE email = %s", (email,))
-    user = cursor.fetchone()
+# -------------------------
+# Key management (public)
+# -------------------------
+@app.post("/create-key")
+def create_key_api():
+    payload = request.get_json(silent=True) or {}
+    try:
+        normalized = validate_key_payload(payload)
+    except ValidationError as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+    if not normalized.get("user_id"):
+        normalized["user_id"] = request.headers.get("X-User-Id") or "anonymous"
+    mode = normalized.get("mode", "quick")
+    if mode == "quick":
+        created = quick_key_create(app, normalized)
+    else:
+        created = custom_key_create(app, normalized)
+    record = created.get("key", {})
+    with _store_lock:
+        _KEYS_STORE[record["key_id"]] = record
+    return jsonify({"ok": True, "key": record}), 200
 
-    if not user:
-        return jsonify({"error": "not_found"}), 404
+@app.get("/validate_key/<path:key_to_validate>")
+def validate_key_route(key_to_validate):
+    key_to_validate = unquote_plus(str(key_to_validate)).strip()
+    now = time.time()
+    with _store_lock:
+        rec = _KEYS_STORE.get(key_to_validate)
+    if not rec:
+        return jsonify({"ok": False, "valid": False, "message": "Invalid or unknown key"}), 400
+    try:
+        rec_expires_at = float(rec.get("expires_at") or 0)
+    except Exception:
+        return jsonify({"ok": False, "valid": False, "message": "Malformed expiry"}), 500
+    if now > rec_expires_at:
+        with _store_lock:
+            rec["status"] = "revoked"
+            _KEYS_STORE[key_to_validate] = rec
+        return jsonify({"ok": False, "valid": False, "message": "Key expired"}), 410
+    valid = rec.get("status") == "active"
+    return jsonify({"ok": True, "valid": valid, "message": "Key valid" if valid else "Key revoked", "expires_at": rec_expires_at, "expires_in": int(rec_expires_at - now)}), 200
 
-    # TEMPORARY: plain-text password check
-    if user["password_hash"] != password:
-        return jsonify({"error": "invalid_password"}), 403
+@app.post("/keys/burn")
+def keys_burn():
+    data = request.get_json(silent=True) or {}
+    key_to_burn = data.get("key")
+    if not key_to_burn:
+        return jsonify({"ok": False, "message": "No key provided"}), 400
+    with _store_lock:
+        key_info = _KEYS_STORE.get(key_to_burn)
+        if not key_info:
+            return jsonify({"ok": False, "message": "Key not found"}), 404
+        key_info["status"] = "revoked"
+        _KEYS_STORE[key_to_burn] = key_info
+    app.logger_custom.info(json.dumps({"event":"key.burned","key_id": key_to_burn, "user_id": key_info.get("user_id")}))
+    return jsonify({"ok": True, "message": f"Key {key_to_burn} burned"}), 200
 
-    if user["role"] != "admin":
+# create-key GET flow (browser)
+@app.route("/create-key", methods=["GET"])
+def create_key_get():
+    user_id = session.get("user", {}).get("id") if session else None
+    user_id = str(user_id) if user_id else request.args.get("user_id") or "anonymous"
+    payload = {"mode": "quick", "user_id": user_id}
+    created = quick_key_create(app, payload)
+    record = created.get("key", {})
+    with _store_lock:
+        _KEYS_STORE[record["key_id"]] = record
+    return redirect("https://gaming-mods.com/keys.html")
+
+# -------------------------
+# Postback webhook
+# -------------------------
+@app.post("/postback")
+def postback_route():
+    payload = request.get_json(silent=True) or {}
+    try:
+        validated = validate_postback_payload(payload)
+    except ValidationError as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+    app.logger_custom.info(json.dumps({"event":"postback.received","tx": validated["transaction_id"], "status": validated["status"]}))
+    try:
+        if validated["status"].lower() in ("completed", "success", "ok") and validated["user_id"]:
+            create_payload = {"mode": "quick", "user_id": validated["user_id"], "role_id": validated["metadata"].get("role_id", "default_role"), "admin_override": False}
+            created = quick_key_create(app, create_payload)
+            record = created.get("key", {})
+            with _store_lock:
+                _KEYS_STORE[record["key_id"]] = record
+    except Exception as exc:
+        app.logger_custom.warning(json.dumps({"event":"postback.processing_error","tx": validated.get("transaction_id"), "error": repr(exc)}))
+    return jsonify({"ok": True, "tx": validated.get("transaction_id")}), 200
+
+# -------------------------
+# Admin list keys / overrides (header-based simple admin)
+# -------------------------
+def _is_admin_header(user_id_header: Optional[str]) -> bool:
+    try:
+        return int(str(user_id_header)) in ADMIN_USER_IDS
+    except Exception:
+        return False
+
+@app.get("/admin/keys")
+def admin_list_keys():
+    user_id = request.headers.get("X-User-Id")
+    if not _is_admin_header(user_id):
         return jsonify({"error": "not_admin"}), 403
+    return jsonify({"ok": True, "keys": list_keys()}), 200
 
-    payload = {
-        "user_id": user["id"],
-        "role": "admin",
-        "exp": datetime.utcnow() + timedelta(hours=12)
+@app.get("/admin/overrides")
+def admin_list_overrides():
+    user_id = request.headers.get("X-User-Id")
+    if not _is_admin_header(user_id):
+        return jsonify({"error": "not_admin"}), 403
+    return jsonify({"ok": True, "overrides": _OVERRIDES_AUDIT}), 200
+
+# -------------------------
+# Discord OAuth (minimal)
+# -------------------------
+def exchange_token_with_backoff(token_url, data, headers):
+    resp = requests.post(token_url, data=data, headers=headers, timeout=8)
+    if resp.status_code == 429:
+        return {"error": "rate_limited"}
+    resp.raise_for_status()
+    return resp.json()
+
+@app.get("/login/discord")
+def discord_login():
+    if not DISCORD_CLIENT_ID:
+        return jsonify({"error": "discord_not_configured"}), 500
+    params = {
+        "client_id": DISCORD_CLIENT_ID,
+        "redirect_uri": DISCORD_REDIRECT,
+        "response_type": "code",
+        "scope": "identify email"
     }
+    return redirect(f"{DISCORD_API_BASE}/oauth2/authorize?{urlencode(params)}")
 
-    token = jwt.encode(payload, SECRET_KEY, algorithm="HS256")
+@app.get("/login/discord/callback")
+def discord_callback():
+    code = request.args.get("code")
+    state = request.args.get("state")
+    if not code:
+        return jsonify({"error": "missing_code"}), 400
+    token_url = f"{DISCORD_API_BASE}/oauth2/token"
+    data = {
+        "client_id": DISCORD_CLIENT_ID,
+        "client_secret": DISCORD_CLIENT_SECRET,
+        "grant_type": "authorization_code",
+        "code": code,
+        "redirect_uri": DISCORD_REDIRECT
+    }
+    headers = {"Content-Type": "application/x-www-form-urlencoded"}
+    try:
+        token_resp = exchange_token_with_backoff(token_url, data, headers)
+        if token_resp.get("error"):
+            return jsonify({"error": "token_exchange_failed", "detail": token_resp}), 500
+        access_token = token_resp.get("access_token")
+        # Fetch user info
+        user_resp = requests.get(f"{DISCORD_API_BASE}/users/@me", headers={"Authorization": f"Bearer {access_token}"}, timeout=8)
+        user_resp.raise_for_status()
+        user_info = user_resp.json()
+        # Upsert user into DB (email optional)
+        db = get_db()
+        if db:
+            try:
+                cur = db.cursor(dictionary=True)
+                email = user_info.get("email")
+                discord_id = user_info.get("id")
+                cur.execute("SELECT id FROM users WHERE discord_id = %s OR email = %s", (discord_id, email))
+                row = cur.fetchone()
+                if row:
+                    user_id = row["id"]
+                else:
+                    cur.execute("INSERT INTO users (email, username, discord_id, role, created_at) VALUES (%s, %s, %s, %s, %s)", (email, user_info.get("username"), discord_id, "user", datetime.utcnow()))
+                    db.commit()
+                    user_id = cur.lastrowid
+                # create JWT and set session
+                payload = {"user_id": user_id, "role": "user", "exp": datetime.utcnow() + timedelta(hours=JWT_EXP_HOURS)}
+                token = jwt_encode(payload)
+                session["user"] = {"id": user_id, "username": user_info.get("username")}
+                # Redirect back to frontend with token (or set cookie)
+                return redirect(f"https://gaming-mods.com/?token={token}")
+            finally:
+                try: cur.close()
+                except: pass
+                try: db.close()
+                except: pass
+        else:
+            # DB not available: return user info for debugging
+            return jsonify({"ok": True, "user_info": user_info, "note": "db_unavailable"}), 200
+    except Exception as e:
+        app.logger_custom.exception("Discord callback failed: %s", e)
+        return jsonify({"error": "discord_callback_failed", "detail": str(e)}), 500
 
-    return jsonify({"token": token})
+# -------------------------
+# Health & Debug
+# -------------------------
+@app.get("/health")
+def health():
+    return jsonify({"ok": True, "status": "healthy", "req_id": getattr(g, "request_id", None)}), 200
 
+@app.get("/__debug_me")
+def debug_me():
+    cfg = {
+        "SECRET_KEY_set": bool(os.getenv("SECRET_KEY")),
+        "MYSQL_HOST": os.getenv("MYSQL_HOST"),
+        "MYSQL_DB": os.getenv("MYSQL_DB"),
+        "ADMIN_USER_IDS": ADMIN_USER_IDS,
+        "DEBUG": DEBUG
+    }
+    return jsonify({"ok": True, "pid": os.getpid() if hasattr(os, "getpid") else None, "cfg": cfg, "req_id": getattr(g, "request_id", None)}), 200
 
-
-
-
-@app.route("/")
+# -------------------------
+# Root redirect
+# -------------------------
+@app.get("/")
 def index():
     return redirect("https://gaming-mods.com")
 
-# run for local debug
+# -------------------------
+# Run (for local dev)
+# -------------------------
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", "8000")), debug=app.config.get("DEBUG", False))
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", "8000")), debug=DEBUG)
