@@ -172,12 +172,13 @@ app = create_app()
 def get_db():
     try:
         connection = mysql.connector.connect(
-            host="db5019243018.hosting-data.io",
-            user="dbu2365342",
-            password="kmrykmry4",
-            database="dbs15097174",
+            host="82.165.136.190",
+            user="karim",
+            password="Kmrykmry@4!Strong",
+            database="verifier",
             port=3306
         )
+
         return connection
     except Error as e:
         print("Database connection error:", e)
