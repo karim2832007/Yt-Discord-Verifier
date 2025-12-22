@@ -1,4 +1,5 @@
 # app.py  -- Part 1 of 4 (reworked, full-featured, drop-in)
+print("DEBUG: Running latest version")
 import os
 import uuid
 import json
