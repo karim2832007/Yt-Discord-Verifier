@@ -1,17 +1,17 @@
 # app.py
 """
-Full replacement Flask app with CORS credentials fixed and robust features:
-- Single CORS configuration with supports_credentials=True
-- After-request header enforcement for Access-Control-Allow-Credentials
-- Auth (signup/login/forgot/reset) with bcrypt + JWT
-- /portal/me with admin detection
-- Admin decorator and admin endpoints
-- In-memory key system (create/validate/burn)
-- create-key GET/POST flows (browser + API)
-- postback webhook handling
-- Discord OAuth handlers (minimal)
+Optimized, drop-in replacement Flask app with:
+- Single CORS configuration (supports_credentials=True)
+- Proper Access-Control-Allow-Credentials handling (echo origin)
+- Signup / Login / Forgot / Reset flows (bcrypt + JWT)
+- /portal/me that detects admin
+- Admin decorator and example admin endpoints
+- In-memory key system (create/validate/burn) and audit
+- create-key GET/POST flows (API + browser redirect)
+- Postback webhook
+- Minimal Discord OAuth handlers (token exchange + user upsert)
 - Health & debug endpoints
-- Robust DB handling (returns JSON errors if DB unreachable)
+- Robust DB handling and safe logging with request id
 """
 
 import os
@@ -29,7 +29,9 @@ from typing import Optional, Dict, Any
 from urllib.parse import urlencode, unquote_plus
 
 import requests
-from flask import Flask, request, jsonify, g, session, redirect, render_template, make_response
+from flask import (
+    Flask, request, jsonify, g, session, redirect, render_template, make_response
+)
 from flask_cors import CORS
 import mysql.connector
 import bcrypt
@@ -38,20 +40,25 @@ import jwt
 # -------------------------
 # Configuration / Defaults
 # -------------------------
+ENV = os.getenv("FLASK_ENV", "production")
+DEBUG = os.getenv("FLASK_DEBUG", "0").lower() in ("1", "true", "yes")
 SECRET_KEY = os.getenv("SECRET_KEY", "change-me-super-secret")
+JWT_ALGO = "HS256"
+JWT_EXP_HOURS = int(os.getenv("JWT_EXP_HOURS", "12"))
+
 MYSQL_HOST = os.getenv("MYSQL_HOST", "127.0.0.1")
 MYSQL_PORT = int(os.getenv("MYSQL_PORT", "3306"))
 MYSQL_USER = os.getenv("MYSQL_USER", "karim")
 MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD", "Kmrykmry@4!Strong")
 MYSQL_DB = os.getenv("MYSQL_DB", "verifier")
+
 ADMIN_USER_IDS = [int(x) for x in os.getenv("ADMIN_USER_IDS", "").split(",") if x.strip().isdigit()]
+
 CORS_ORIGINS = [
     "https://gaming-mods.com",
     "https://verifier.gaming-mods.com"
 ]
-JWT_ALGO = "HS256"
-JWT_EXP_HOURS = int(os.getenv("JWT_EXP_HOURS", "12"))
-DEBUG = os.getenv("FLASK_DEBUG", "0").lower() in ("1", "true", "yes")
+
 LOG_FILE = os.getenv("LOG_FILE", "")
 
 # Discord OAuth config (optional)
@@ -69,11 +76,13 @@ def make_logger(name: str = "verifier", logfile: str = "") -> logging.Logger:
         return logger
     logger.setLevel(logging.DEBUG if DEBUG else logging.INFO)
     fmt = '{"time":"%(asctime)s","level":"%(levelname)s","name":"%(name)s","req_id":"%(req_id)s","msg":"%(message)s"}'
+
     class SafeFormatter(logging.Formatter):
         def format(self, record):
             if not hasattr(record, "req_id"):
                 record.req_id = "-"
             return super().format(record)
+
     formatter = SafeFormatter(fmt)
     sh = logging.StreamHandler()
     sh.setFormatter(formatter)
@@ -95,7 +104,6 @@ def create_app() -> Flask:
     app.config.update({
         "SECRET_KEY": SECRET_KEY,
         "DEBUG": DEBUG,
-        # Session cookie settings (useful if you set cookies from this domain)
         "SESSION_COOKIE_SAMESITE": os.getenv("SESSION_COOKIE_SAMESITE", "Lax"),
         "SESSION_COOKIE_SECURE": str(os.getenv("SESSION_COOKIE_SECURE", "1")).lower() in ("1", "true", "yes"),
         "SESSION_COOKIE_DOMAIN": os.getenv("SESSION_COOKIE_DOMAIN", ".gaming-mods.com"),
@@ -121,23 +129,22 @@ def create_app() -> Flask:
         def filter(self, rec):
             rec.req_id = getattr(g, "request_id", "-")
             return True
+
     req_filter = ReqIdFilter()
     logger.addFilter(req_filter)
     app.logger.addFilter(req_filter)
     app.logger_custom = logger
+    app.cfg = type("Cfg", (), {"ADMIN_USER_IDS": ADMIN_USER_IDS})()
 
     # Ensure Access-Control-Allow-Credentials header is present and true for credentialed requests
     @app.after_request
     def ensure_cors_credentials(response):
-        # If the request included credentials (cookies or Authorization), ensure header is 'true'
         # Always set to 'true' to satisfy browsers when credentials mode is 'include'
         response.headers["Access-Control-Allow-Credentials"] = "true"
-        # When using credentials, Access-Control-Allow-Origin must not be '*'.
-        # flask-cors will set the origin header; ensure it's present or echo the request origin.
-        if "Access-Control-Allow-Origin" not in response.headers or response.headers.get("Access-Control-Allow-Origin") == "":
-            origin = request.headers.get("Origin")
-            if origin and origin in CORS_ORIGINS:
-                response.headers["Access-Control-Allow-Origin"] = origin
+        # Echo origin if allowed
+        origin = request.headers.get("Origin")
+        if origin and origin in CORS_ORIGINS:
+            response.headers["Access-Control-Allow-Origin"] = origin
         return response
 
     # error handlers
@@ -197,6 +204,7 @@ def check_password(plain: str, hashed: str) -> bool:
     try:
         return bcrypt.checkpw(plain.encode(), hashed.encode())
     except Exception:
+        # fallback for legacy plain-text (temporary)
         return plain == hashed
 
 def generate_random_key(length=10) -> str:
@@ -209,8 +217,6 @@ def generate_random_key(length=10) -> str:
 _store_lock = threading.RLock()
 _KEYS_STORE: Dict[str, dict] = {}
 _OVERRIDES_AUDIT = []
-global_override = False
-admin_overrides = {}
 LEGACY_LIMIT_SECONDS = 3600
 
 # -------------------------
@@ -530,6 +536,7 @@ def auth_forgot():
         cur.execute("UPDATE users SET reset_token=%s, reset_expires=%s WHERE id = %s", (token, expires, user["id"]))
         db.commit()
         app.logger_custom.info(json.dumps({"event":"password.reset.requested","email": email}))
+        # For security, we log the reset link server-side; in production send email.
         print("RESET LINK:", f"https://gaming-mods.com/reset?token={token}")
         return jsonify({"ok": True})
     finally:
@@ -739,7 +746,7 @@ def keys_burn():
     app.logger_custom.info(json.dumps({"event":"key.burned","key_id": key_to_burn, "user_id": key_info.get("user_id")}))
     return jsonify({"ok": True, "message": f"Key {key_to_burn} burned"}), 200
 
-@app.route("/create-key", methods=["GET"])
+@app.get("/create-key")
 def create_key_get():
     user_id = session.get("user", {}).get("id") if session else None
     user_id = str(user_id) if user_id else request.args.get("user_id") or "anonymous"
