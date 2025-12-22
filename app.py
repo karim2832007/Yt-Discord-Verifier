@@ -82,7 +82,7 @@ def create_app(config: Optional[Config] = None) -> Flask:
     cfg = config or Config()
     app = Flask(__name__)
 
-    # Enable CORS for your domains
+    # Enable CORS for your domains (ONLY this one — do NOT add another CORS() call)
     CORS(app, resources={
         r"/*": {
             "origins": [
@@ -103,14 +103,13 @@ def create_app(config: Optional[Config] = None) -> Flask:
         SESSION_COOKIE_DOMAIN=cfg.SESSION_COOKIE_DOMAIN
     )
 
-
     # Attach config and logger
     app.cfg = cfg
     logger = make_logger(logfile=cfg.LOG_FILE)
     app.logger_custom = logger
 
-    # ✅ Apply CORS inside the function
-    CORS(app, supports_credentials=True, origins=["https://gaming-mods.com"])
+    return app
+
 
     # ✅ Handle OPTIONS requests
     @app.before_request
