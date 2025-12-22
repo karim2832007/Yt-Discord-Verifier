@@ -1,13 +1,17 @@
 # app.py
 """
-Full replacement Flask app:
+Full replacement Flask app with CORS credentials fixed and robust features:
+- Single CORS configuration with supports_credentials=True
+- After-request header enforcement for Access-Control-Allow-Credentials
 - Auth (signup/login/forgot/reset) with bcrypt + JWT
+- /portal/me with admin detection
 - Admin decorator and admin endpoints
-- Key system (in-memory store) with create/validate/burn
-- create-key route (GET/POST), postback webhook
-- Discord OAuth minimal handlers (login + callback)
-- Health and debug endpoints
-- Robust DB handling and single CORS config
+- In-memory key system (create/validate/burn)
+- create-key GET/POST flows (browser + API)
+- postback webhook handling
+- Discord OAuth handlers (minimal)
+- Health & debug endpoints
+- Robust DB handling (returns JSON errors if DB unreachable)
 """
 
 import os
@@ -22,10 +26,9 @@ from logging.handlers import RotatingFileHandler
 from datetime import datetime, timedelta
 from functools import wraps
 from typing import Optional, Dict, Any
-
 from urllib.parse import urlencode, unquote_plus
-import requests
 
+import requests
 from flask import Flask, request, jsonify, g, session, redirect, render_template, make_response
 from flask_cors import CORS
 import mysql.connector
@@ -92,10 +95,21 @@ def create_app() -> Flask:
     app.config.update({
         "SECRET_KEY": SECRET_KEY,
         "DEBUG": DEBUG,
+        # Session cookie settings (useful if you set cookies from this domain)
+        "SESSION_COOKIE_SAMESITE": os.getenv("SESSION_COOKIE_SAMESITE", "Lax"),
+        "SESSION_COOKIE_SECURE": str(os.getenv("SESSION_COOKIE_SECURE", "1")).lower() in ("1", "true", "yes"),
+        "SESSION_COOKIE_DOMAIN": os.getenv("SESSION_COOKIE_DOMAIN", ".gaming-mods.com"),
+        "SESSION_COOKIE_HTTPONLY": True,
     })
 
-    # Single CORS call
-    CORS(app, resources={r"/*": {"origins": CORS_ORIGINS, "methods": ["GET","POST","PUT","DELETE","OPTIONS"], "allow_headers": ["Content-Type","Authorization"]}})
+    # Single CORS call with credentials support
+    CORS(app,
+         resources={r"/*": {"origins": CORS_ORIGINS,
+                            "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+                            "allow_headers": ["Content-Type", "Authorization", "X-Requested-With"],
+                            "expose_headers": ["Content-Type", "Authorization"],
+                            }},
+         supports_credentials=True)
 
     # request id middleware
     @app.before_request
@@ -111,6 +125,20 @@ def create_app() -> Flask:
     logger.addFilter(req_filter)
     app.logger.addFilter(req_filter)
     app.logger_custom = logger
+
+    # Ensure Access-Control-Allow-Credentials header is present and true for credentialed requests
+    @app.after_request
+    def ensure_cors_credentials(response):
+        # If the request included credentials (cookies or Authorization), ensure header is 'true'
+        # Always set to 'true' to satisfy browsers when credentials mode is 'include'
+        response.headers["Access-Control-Allow-Credentials"] = "true"
+        # When using credentials, Access-Control-Allow-Origin must not be '*'.
+        # flask-cors will set the origin header; ensure it's present or echo the request origin.
+        if "Access-Control-Allow-Origin" not in response.headers or response.headers.get("Access-Control-Allow-Origin") == "":
+            origin = request.headers.get("Origin")
+            if origin and origin in CORS_ORIGINS:
+                response.headers["Access-Control-Allow-Origin"] = origin
+        return response
 
     # error handlers
     @app.errorhandler(400)
@@ -286,6 +314,27 @@ def validate_key_payload(data: dict) -> dict:
         "role_id": role_id,
         "admin_override": admin_override,
         "duration_minutes": duration_minutes
+    }
+
+def validate_postback_payload(data: dict) -> dict:
+    if not isinstance(data, dict):
+        raise ValidationError("postback payload must be a JSON object")
+    tx_id = data.get("transaction_id") or data.get("tx") or data.get("id")
+    if tx_id is None:
+        tx_id = f"tx-{int(datetime.utcnow().timestamp())}"
+    tx_id = _ensure_str(str(tx_id), "transaction_id")
+    user_id_raw = data.get("user_id") or data.get("uid")
+    user_id = _ensure_str(str(user_id_raw), "user_id") if user_id_raw is not None else None
+    status = data.get("status", "unknown")
+    status = _ensure_str(status, "status")
+    metadata = data.get("metadata") or {}
+    if not isinstance(metadata, dict):
+        metadata = {"raw": str(metadata)}
+    return {
+        "transaction_id": tx_id,
+        "user_id": user_id,
+        "status": status,
+        "metadata": metadata
     }
 
 # -------------------------
@@ -690,7 +739,6 @@ def keys_burn():
     app.logger_custom.info(json.dumps({"event":"key.burned","key_id": key_to_burn, "user_id": key_info.get("user_id")}))
     return jsonify({"ok": True, "message": f"Key {key_to_burn} burned"}), 200
 
-# create-key GET flow (browser)
 @app.route("/create-key", methods=["GET"])
 def create_key_get():
     user_id = session.get("user", {}).get("id") if session else None
@@ -772,7 +820,6 @@ def discord_login():
 @app.get("/login/discord/callback")
 def discord_callback():
     code = request.args.get("code")
-    state = request.args.get("state")
     if not code:
         return jsonify({"error": "missing_code"}), 400
     token_url = f"{DISCORD_API_BASE}/oauth2/token"
@@ -789,11 +836,9 @@ def discord_callback():
         if token_resp.get("error"):
             return jsonify({"error": "token_exchange_failed", "detail": token_resp}), 500
         access_token = token_resp.get("access_token")
-        # Fetch user info
         user_resp = requests.get(f"{DISCORD_API_BASE}/users/@me", headers={"Authorization": f"Bearer {access_token}"}, timeout=8)
         user_resp.raise_for_status()
         user_info = user_resp.json()
-        # Upsert user into DB (email optional)
         db = get_db()
         if db:
             try:
@@ -808,11 +853,9 @@ def discord_callback():
                     cur.execute("INSERT INTO users (email, username, discord_id, role, created_at) VALUES (%s, %s, %s, %s, %s)", (email, user_info.get("username"), discord_id, "user", datetime.utcnow()))
                     db.commit()
                     user_id = cur.lastrowid
-                # create JWT and set session
                 payload = {"user_id": user_id, "role": "user", "exp": datetime.utcnow() + timedelta(hours=JWT_EXP_HOURS)}
                 token = jwt_encode(payload)
                 session["user"] = {"id": user_id, "username": user_info.get("username")}
-                # Redirect back to frontend with token (or set cookie)
                 return redirect(f"https://gaming-mods.com/?token={token}")
             finally:
                 try: cur.close()
@@ -820,7 +863,6 @@ def discord_callback():
                 try: db.close()
                 except: pass
         else:
-            # DB not available: return user info for debugging
             return jsonify({"ok": True, "user_info": user_info, "note": "db_unavailable"}), 200
     except Exception as e:
         app.logger_custom.exception("Discord callback failed: %s", e)
