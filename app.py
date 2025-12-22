@@ -951,19 +951,46 @@ def login_discord_callback():
 
 
 from functools import wraps
-from flask import request, jsonify, session, current_app, abort
+from flask import request, jsonify, g
+import jwt
 
-# Minimal admin check decorator (replace with your auth logic if different)
+SECRET_KEY = "super_secure_admin_jwt_key_2832007_xA9!fL#pQ2@vZ7"  # keep same as admin_login
+
 def require_admin(f):
     @wraps(f)
     def wrapped(*args, **kwargs):
-        user = session.get("user")
-        owner_id = current_app.config.get("OWNER_ID")
-        # allow local override for testing: OWNER_ID can be str or int
-        if owner_id is not None and user and str(user.get("id")) == str(owner_id):
-            return f(*args, **kwargs)
-        return jsonify({"error": "unauthorized"}), 403
+        auth = request.headers.get("Authorization", "")
+        if not auth.startswith("Bearer "):
+            return jsonify({"error": "missing_token"}), 403
+
+        token = auth.split(" ", 1)[1]
+
+        try:
+            payload = jwt.decode(token, SECRET_KEY, algorithms=["HS256"])
+        except Exception:
+            return jsonify({"error": "invalid_token"}), 403
+
+        user_id = payload.get("user_id")
+        if not user_id:
+            return jsonify({"error": "invalid_payload"}), 403
+
+        db = get_db()
+        cursor = db.cursor(dictionary=True)
+        cursor.execute("SELECT id, role FROM users WHERE id = %s", (user_id,))
+        user = cursor.fetchone()
+
+        if not user:
+            return jsonify({"error": "user_not_found"}), 403
+
+        if user["role"] != "admin":
+            return jsonify({"error": "not_admin"}), 403
+
+        # used by /admin/add-perk, /admin/ban-user, etc.
+        g.admin_id = user["id"]
+
+        return f(*args, **kwargs)
     return wrapped
+
 
 # In-memory placeholders (swap for DB / persistent store)
 _ADMIN_LOGS = ["System started", "Waiting for actions..."]
@@ -1253,11 +1280,6 @@ def __debug_me():
         "last_error": last_error,
     })
 
-import jwt
-from datetime import datetime, timedelta
-from flask import request, jsonify
-
-SECRET_KEY = "super_secure_admin_jwt_key_2832007_xA9!fL#pQ2@vZ7"
 
 @app.route("/admin/login", methods=["POST"])
 def admin_login():
