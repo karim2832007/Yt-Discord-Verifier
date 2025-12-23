@@ -1,5 +1,4 @@
 # app.py  -- Part 1 of 4 (reworked, full-featured, drop-in)
-print("DEBUG: Running latest version")
 import os
 import uuid
 import json
@@ -17,9 +16,6 @@ import requests
 from urllib.parse import unquote_plus
 from flask import Flask, request, g, jsonify, session, redirect, url_for, make_response
 from flask_cors import CORS
-import mysql.connector
-from mysql.connector import Error
-
 # --- Config loader ---------------------------------------------------------
 class Config:
     def __init__(self):
@@ -82,19 +78,6 @@ def get_request_id() -> str:
 def create_app(config: Optional[Config] = None) -> Flask:
     cfg = config or Config()
     app = Flask(__name__)
-
-    # Enable CORS for your domains (ONLY this one — do NOT add another CORS() call)
-    CORS(app, resources={
-        r"/*": {
-            "origins": [
-                "https://gaming-mods.com",
-                "https://verifier.gaming-mods.com"
-            ],
-            "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-            "allow_headers": ["Content-Type", "Authorization"]
-        }
-    })
-
     app.config.from_mapping(
         SECRET_KEY=cfg.SECRET_KEY,
         DEBUG=cfg.DEBUG,
@@ -109,8 +92,8 @@ def create_app(config: Optional[Config] = None) -> Flask:
     logger = make_logger(logfile=cfg.LOG_FILE)
     app.logger_custom = logger
 
-    return app
-
+    # ✅ Apply CORS inside the function
+    CORS(app, supports_credentials=True, origins=["https://gaming-mods.com"])
 
     # ✅ Handle OPTIONS requests
     @app.before_request
@@ -182,21 +165,6 @@ def exchange_token_with_backoff(token_url, data, headers):
 
 # module-level app for gunicorn
 app = create_app()
-
-def get_db():
-    try:
-        connection = mysql.connector.connect(
-            host="82.165.136.190",
-            user="karim",
-            password="Kmrykmry@4!Strong",
-            database="verifier",
-            port=3306
-        )
-
-        return connection
-    except Error as e:
-        print("Database connection error:", e)
-        return None
 
 # app.py  -- Part 2 of 4
 # Exceptions and validators
@@ -966,46 +934,19 @@ def login_discord_callback():
 
 
 from functools import wraps
-from flask import request, jsonify, g
-import jwt
+from flask import request, jsonify, session, current_app, abort
 
-SECRET_KEY = "super_secure_admin_jwt_key_2832007_xA9!fL#pQ2@vZ7"  # keep same as admin_login
-
+# Minimal admin check decorator (replace with your auth logic if different)
 def require_admin(f):
     @wraps(f)
     def wrapped(*args, **kwargs):
-        auth = request.headers.get("Authorization", "")
-        if not auth.startswith("Bearer "):
-            return jsonify({"error": "missing_token"}), 403
-
-        token = auth.split(" ", 1)[1]
-
-        try:
-            payload = jwt.decode(token, SECRET_KEY, algorithms=["HS256"])
-        except Exception:
-            return jsonify({"error": "invalid_token"}), 403
-
-        user_id = payload.get("user_id")
-        if not user_id:
-            return jsonify({"error": "invalid_payload"}), 403
-
-        db = get_db()
-        cursor = db.cursor(dictionary=True)
-        cursor.execute("SELECT id, role FROM users WHERE id = %s", (user_id,))
-        user = cursor.fetchone()
-
-        if not user:
-            return jsonify({"error": "user_not_found"}), 403
-
-        if user["role"] != "admin":
-            return jsonify({"error": "not_admin"}), 403
-
-        # used by /admin/add-perk, /admin/ban-user, etc.
-        g.admin_id = user["id"]
-
-        return f(*args, **kwargs)
+        user = session.get("user")
+        owner_id = current_app.config.get("OWNER_ID")
+        # allow local override for testing: OWNER_ID can be str or int
+        if owner_id is not None and user and str(user.get("id")) == str(owner_id):
+            return f(*args, **kwargs)
+        return jsonify({"error": "unauthorized"}), 403
     return wrapped
-
 
 # In-memory placeholders (swap for DB / persistent store)
 _ADMIN_LOGS = ["System started", "Waiting for actions..."]
@@ -1014,7 +955,7 @@ _KEYS = [
     {"key": "ABC123", "type": "global", "expiry": "2025-12-01", "owner": "User#1234", "status": "active"}
 ]
 _KEY_LOGS = ["Created key ABC123 for User#1234", "Revoked key XYZ789"]
-_ADMIN_LOGS.append("Added perk X")
+_PERKS = []
 
 # GET /admin/logs
 @app.route("/admin/logs", methods=["GET"])
@@ -1030,141 +971,62 @@ def admin_add_perk():
     perk = data.get("perk")
     if not perk:
         return jsonify({"error": "missing perk"}), 400
-
-    # Insert perk into database
-    db = get_db()
-    cursor = db.cursor()
-    cursor.execute(
-        "INSERT INTO perks (name, description) VALUES (%s, %s)",
-        (perk, "")
-    )
-    db.commit()
-
-    # Log admin action in admin_logs table
-    admin_id = g.admin_id  # require_admin should set this
-    cursor.execute(
-        "INSERT INTO admin_logs (admin_id, action_type, details) VALUES (%s, %s, %s)",
-        (admin_id, "add_perk", f"Added perk {perk}")
-    )
-    db.commit()
-
+    _PERKS.append(perk)
+    _ADMIN_LOGS.append(f"Added perk {perk}")
     return jsonify({"status": "success", "action": f"Added perk {perk}"})
 
-
+# POST /admin/remove-perk
 @app.route("/admin/remove-perk", methods=["POST"])
 @require_admin
 def admin_remove_perk():
     data = request.get_json(silent=True) or {}
     perk = data.get("perk")
-
     if not perk:
         return jsonify({"error": "missing perk"}), 400
-
-    db = get_db()
-    cursor = db.cursor()
-
-    # Check if perk exists
-    cursor.execute("SELECT id FROM perks WHERE name = %s", (perk,))
-    row = cursor.fetchone()
-    if not row:
+    try:
+        _PERKS.remove(perk)
+    except ValueError:
         return jsonify({"error": "perk not found"}), 404
-
-    perk_id = row[0]
-
-    # Remove perk
-    cursor.execute("DELETE FROM perks WHERE id = %s", (perk_id,))
-    db.commit()
-
-    # Log admin action
-    cursor.execute(
-        "INSERT INTO admin_logs (admin_id, action_type, details) VALUES (%s, %s, %s)",
-        (g.admin_id, "remove_perk", f"Removed perk {perk}")
-    )
-    db.commit()
-
+    _ADMIN_LOGS.append(f"Removed perk {perk}")
     return jsonify({"status": "success", "action": f"Removed perk {perk}"})
 
-
+# POST /admin/ban-user
 @app.route("/admin/ban-user", methods=["POST"])
 @require_admin
 def admin_ban_user():
     data = request.get_json(silent=True) or {}
     user_id = data.get("user_id")
-
     if not user_id:
         return jsonify({"error": "missing user_id"}), 400
-
-    db = get_db()
-    cursor = db.cursor()
-
-    # Update banned flag
-    cursor.execute("UPDATE users SET banned = 1 WHERE id = %s", (user_id,))
-    db.commit()
-
-    # Log admin action
-    cursor.execute(
-        "INSERT INTO admin_logs (admin_id, action_type, details, target_user_id) VALUES (%s, %s, %s, %s)",
-        (g.admin_id, "ban_user", f"Banned user {user_id}", user_id)
-    )
-    db.commit()
-
+    _ADMIN_LOGS.append(f"Banned user {user_id}")
+    # TODO: persist ban in DB
     return jsonify({"status": "success", "action": f"Banned user {user_id}"})
 
-
+# POST /admin/unban-user
 @app.route("/admin/unban-user", methods=["POST"])
 @require_admin
 def admin_unban_user():
     data = request.get_json(silent=True) or {}
     user_id = data.get("user_id")
-
     if not user_id:
         return jsonify({"error": "missing user_id"}), 400
-
-    db = get_db()
-    cursor = db.cursor()
-
-    # Update banned flag
-    cursor.execute("UPDATE users SET banned = 0 WHERE id = %s", (user_id,))
-    db.commit()
-
-    # Log admin action
-    cursor.execute(
-        "INSERT INTO admin_logs (admin_id, action_type, details, target_user_id) VALUES (%s, %s, %s, %s)",
-        (g.admin_id, "unban_user", f"Unbanned user {user_id}", user_id)
-    )
-    db.commit()
-
+    _ADMIN_LOGS.append(f"Unbanned user {user_id}")
+    # TODO: remove ban in DB
     return jsonify({"status": "success", "action": f"Unbanned user {user_id}"})
 
-
+# GET /admin/users
 @app.route("/admin/users", methods=["GET"])
 @require_admin
 def admin_list_users():
-    db = get_db()
-    cursor = db.cursor(dictionary=True)
+    return jsonify({"users": _USERS})
 
-    cursor.execute("SELECT id, email, username, discord_id, role, banned, age_verified, created_at FROM users")
-    users = cursor.fetchall()
-
-    return jsonify({"users": users})
-
+# GET /admin/stats
 @app.route("/admin/stats", methods=["GET"])
 @require_admin
 def admin_stats():
-    db = get_db()
-    cursor = db.cursor()
-
-    # Count users
-    cursor.execute("SELECT COUNT(*) FROM users")
-    users_count = cursor.fetchone()[0]
-
-    # Count perks
-    cursor.execute("SELECT COUNT(*) FROM perks")
-    perks_count = cursor.fetchone()[0]
-
     return jsonify({
-        "active_users": users_count,
-        "perks_count": perks_count
+        "active_users": len(_USERS),
+        "perks_count": len(_PERKS)
     })
 
 # POST /admin/create-key
@@ -1294,49 +1156,6 @@ def __debug_me():
         "session": session_info,
         "last_error": last_error,
     })
-
-
-@app.route("/admin/login", methods=["POST"])
-def admin_login():
-    data = request.get_json(silent=True) or {}
-    email = data.get("email")
-    password = data.get("password")
-
-    if not email or not password:
-        return jsonify({"error": "missing_fields"}), 400
-
-    # DEBUG: check if DB connection failed
-    db = get_db()
-    if db is None:
-        return jsonify({"error": "db_connection_failed"}), 500
-
-    cursor = db.cursor(dictionary=True)
-    cursor.execute("SELECT * FROM users WHERE email = %s", (email,))
-    user = cursor.fetchone()
-
-    if not user:
-        return jsonify({"error": "not_found"}), 404
-
-    # TEMPORARY: plain-text password check
-    if user["password_hash"] != password:
-        return jsonify({"error": "invalid_password"}), 403
-
-    if user["role"] != "admin":
-        return jsonify({"error": "not_admin"}), 403
-
-    payload = {
-        "user_id": user["id"],
-        "role": "admin",
-        "exp": datetime.utcnow() + timedelta(hours=12)
-    }
-
-    token = jwt.encode(payload, SECRET_KEY, algorithm="HS256")
-
-    return jsonify({"token": token})
-
-
-
-
 
 @app.route("/")
 def index():
