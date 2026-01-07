@@ -1,13 +1,12 @@
-from flask import Blueprint, request, jsonify, render_template
-
+from flask import Blueprint, request, jsonify, session, render_template, send_from_directory
 from ..exceptions import AuthorizationError
 from ..stores import list_keys, list_override_audit
 
-bp = Blueprint("admin", __name__)
+bp = Blueprint("admin", __name__, static_folder="static", template_folder="templates")
 
 
 # -----------------------------
-# Helper: check admin
+# Helper: check admin (SESSION-BASED)
 # -----------------------------
 def _is_admin(app, user_id: str) -> bool:
     try:
@@ -24,7 +23,11 @@ def _is_admin(app, user_id: str) -> bool:
 def admin_list_keys():
     from flask import current_app as app
 
-    user_id = request.headers.get("X-User-Id")
+    user = session.get("user")
+    if not user:
+        raise AuthorizationError("not logged in")
+
+    user_id = user.get("id")
     if not _is_admin(app, user_id):
         raise AuthorizationError("not admin")
 
@@ -38,17 +41,13 @@ def admin_list_keys():
 def admin_list_overrides():
     from flask import current_app as app
 
-    user_id = request.headers.get("X-User-Id")
+    user = session.get("user")
+    if not user:
+        raise AuthorizationError("not logged in")
+
+    user_id = user.get("id")
     if not _is_admin(app, user_id):
         raise AuthorizationError("not admin")
 
     return jsonify({"ok": True, "overrides": list_override_audit()}), 200
 
-
-# -----------------------------
-# Admin panel page
-# -----------------------------
-@bp.route("/admin")
-def admin():
-    # You can replace this with your own HTML later
-    return "<h1>Admin Panel</h1><p>Replace with admin.html template.</p>"
