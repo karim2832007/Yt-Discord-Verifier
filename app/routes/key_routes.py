@@ -10,7 +10,15 @@ bp = Blueprint("key_routes", __name__)
 # ---------------------------------------------------------
 # Helper: create a key record
 # ---------------------------------------------------------
-def create_key_record(user_id, key_type="game", duration=1440, role_id=None, nsfw=False, perks=None, max_devices=1):
+def create_key_record(
+    user_id,
+    key_type="game",
+    duration=1440,
+    role_id=None,
+    nsfw=False,
+    perks=None,
+    max_devices=1
+):
     key_value = f"GM-{uuid.uuid4().hex[:4].upper()}-{uuid.uuid4().hex[:4].upper()}"
     expires_at = (datetime.utcnow() + timedelta(minutes=duration)).timestamp()
 
@@ -38,6 +46,7 @@ def create_key_record(user_id, key_type="game", duration=1440, role_id=None, nsf
 # ---------------------------------------------------------
 @bp.route("/create-key", methods=["GET", "POST"])
 def create_key_route():
+
     # -----------------------------------------------------
     # POST: JSON API (React)
     # -----------------------------------------------------
@@ -48,41 +57,22 @@ def create_key_route():
         if not user_id:
             return jsonify({"ok": False, "message": "Missing user_id"}), 400
 
-        key_type = data.get("type", "game")
-        duration = int(data.get("duration_minutes", 1440))
-        role_id = data.get("role_id")
-        nsfw = bool(data.get("nsfw", False))
-        perks = data.get("perks")
-        max_devices = int(data.get("max_devices", 1))
-
         key = create_key_record(
             user_id=user_id,
-            key_type=key_type,
-            duration=duration,
-            role_id=role_id,
-            nsfw=nsfw,
-            perks=perks,
-            max_devices=max_devices
+            key_type=data.get("type", "game"),
+            duration=int(data.get("duration_minutes", 1440)),
+            role_id=data.get("role_id"),
+            nsfw=bool(data.get("nsfw", False)),
+            perks=data.get("perks"),
+            max_devices=int(data.get("max_devices", 1))
         )
 
-        # Detect if client wants JSON
-        wants_json = (
-            request.is_json
-            or request.headers.get("X-Requested-With") == "XMLHttpRequest"
-            or "application/json" in (request.headers.get("Accept") or "")
-        )
-
-        if wants_json:
-            return jsonify({"ok": True, "key": key.to_record()}), 200
-
-        # Browser POST → redirect
-        return redirect("https://gaming-mods.com/#/game-key")
+        return jsonify({"ok": True, "key": key.to_record()}), 200
 
 
     # -----------------------------------------------------
-    # GET: Auto-generate quick key + redirect
+    # GET: Auto-generate quick key + redirect WITH KEY
     # -----------------------------------------------------
-    # Prefer session user
     if "user" in session and session["user"].get("id"):
         user_id = session["user"]["id"]
     else:
@@ -90,8 +80,8 @@ def create_key_route():
 
     key = create_key_record(user_id=user_id)
 
-    # Redirect to your frontend page
-    return redirect("https://gaming-mods.com/#/game-key")
+    # Redirect WITH the key in the URL
+    return redirect(f"https://gaming-mods.com/#/game-key?key={key.key_value}")
 
 
 # ---------------------------------------------------------
