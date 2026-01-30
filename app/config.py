@@ -1,21 +1,20 @@
 import os
 
 class Config:
-    # Flask
     SECRET_KEY = os.environ.get("SECRET_KEY", "dev-secret")
     DEBUG = True
 
-    # SQLAlchemy
     SQLALCHEMY_DATABASE_URI = os.environ.get(
         "DATABASE_URL",
         "sqlite:///database.db"
     )
     SQLALCHEMY_TRACK_MODIFICATIONS = False
 
-    # Optional: allow larger JSON payloads
     JSON_AS_ASCII = False
 
-    # ⭐ SESSION SETTINGS (required for cross-domain login)
-    SESSION_COOKIE_DOMAIN = os.environ.get("SESSION_COOKIE_DOMAIN", None)
-    SESSION_COOKIE_SAMESITE = os.environ.get("SESSION_COOKIE_SAMESITE", "Lax")
-    SESSION_COOKIE_SECURE = bool(int(os.environ.get("SESSION_COOKIE_SECURE", "0")))
+    # ⭐ EXACT SAME SESSION SETTINGS AS OLD SITE
+    SESSION_COOKIE_NAME = os.environ.get("SESSION_COOKIE_NAME", "gamingmods_session")
+    SESSION_COOKIE_DOMAIN = os.environ.get("SESSION_COOKIE_DOMAIN", ".gaming-mods.com")
+    SESSION_COOKIE_SAMESITE = os.environ.get("SESSION_COOKIE_SAMESITE", "None")
+    SESSION_COOKIE_SECURE = str(os.environ.get("SESSION_COOKIE_SECURE", "1")).lower() in ("1", "true", "yes")
+    SESSION_COOKIE_HTTPONLY = True
