@@ -1,5 +1,6 @@
 from flask import Blueprint, send_from_directory
 import os
+from flask import session
 
 bp = Blueprint("system", __name__)
 
