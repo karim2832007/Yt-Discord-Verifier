@@ -1,5 +1,6 @@
 from flask import Blueprint, request, jsonify
 from app.services.nsfw_service import NSFWService
+from flask import session
 
 bp = Blueprint("nsfw", __name__)
 
