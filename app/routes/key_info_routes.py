@@ -1,5 +1,6 @@
 from flask import Blueprint, jsonify
 from app.models.key import Key
+from flask import session
 
 bp = Blueprint("key_info_routes", __name__)
 
