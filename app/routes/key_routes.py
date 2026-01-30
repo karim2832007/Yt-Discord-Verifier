@@ -76,7 +76,7 @@ def create_key_route():
             return jsonify({"ok": True, "key": key.to_record()}), 200
 
         # Browser POST → redirect
-        return redirect("https://gaming-mods.com/game-key")
+        return redirect("https://gaming-mods.com/#/game-key")
 
 
     # -----------------------------------------------------
