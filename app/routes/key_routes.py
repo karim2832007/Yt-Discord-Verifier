@@ -75,9 +75,9 @@ def create_key_route():
     # GET: Auto-generate quick key + redirect WITH KEY
     # -----------------------------------------------------
 
-    # Extract user_id from JWT token
+    # 1. Try Authorization header
     auth_header = request.headers.get("Authorization")
-    user_id = None
+    token = None
 
     if auth_header:
         if auth_header.startswith("Bearer "):
@@ -85,15 +85,19 @@ def create_key_route():
         else:
             token = auth_header
 
-        user_id = Auth.verify_token(token)
+    # 2. If missing, try ?token= in URL
+    if not token:
+        token = request.args.get("token")
 
-    # If no token → fallback to ?user_id= or anonymous
+    # 3. Decode token → user_id
+    user_id = Auth.verify_token(token) if token else None
+
+    # 4. If still no user → fallback
     if not user_id:
         user_id = request.args.get("user_id") or "anonymous"
 
     key = create_key_record(user_id=user_id)
 
-    # Redirect WITH the key in the URL
     return redirect(f"https://gaming-mods.com/#/game-key?key={key.key_value}")
 
 
