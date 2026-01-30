@@ -2,66 +2,103 @@ from flask import Blueprint, request, jsonify
 from app.services.user_service import UserService
 from app.security.auth import Auth
 from app.extensions import db
+from sqlalchemy.exc import IntegrityError
 
 bp = Blueprint("auth", __name__)
 
+# ---------------------------------------------------------
+# REGISTER
+# ---------------------------------------------------------
 @bp.post("/register")
 def register():
-    data = request.json
+    data = request.get_json(silent=True) or {}
+
     email = data.get("email")
     username = data.get("username")
     password = data.get("password")
 
+    # Basic validation
+    if not email or not username or not password:
+        return jsonify({"error": "Missing required fields"}), 400
+
+    # Email already exists
     if UserService.get_user_by_email(email):
         return jsonify({"error": "Email already exists"}), 400
 
-    password_hash = Auth.hash_password(password)
-    user = UserService.create_user(email, username, password_hash)
+    try:
+        password_hash = Auth.hash_password(password)
+        user = UserService.create_user(email, username, password_hash)
 
-    # Discord fallback
-    if not user.discord_username:
-        user.discord_username = username
-        db.session.commit()
+        # Discord fallback
+        if not user.discord_username:
+            user.discord_username = username
+            db.session.commit()
 
-    token = Auth.create_token(user.id)
-    return jsonify({
-        "token": token,
-        "user": {
-            "id": user.id,
-            "email": user.email,
-            "username": user.username,
-            "discord_username": user.discord_username
-        }
-    })
+        token = Auth.create_token(user.id)
+
+        return jsonify({
+            "token": token,
+            "user": {
+                "id": user.id,
+                "email": user.email,
+                "username": user.username,
+                "discord_username": user.discord_username
+            }
+        }), 200
+
+    except IntegrityError:
+        db.session.rollback()
+        return jsonify({"error": "Email already exists"}), 400
+
+    except Exception:
+        db.session.rollback()
+        return jsonify({"error": "Server error"}), 500
 
 
+# ---------------------------------------------------------
+# LOGIN
+# ---------------------------------------------------------
 @bp.post("/login")
 def login():
-    data = request.json
+    data = request.get_json(silent=True) or {}
+
     email = data.get("email")
     password = data.get("password")
 
+    if not email or not password:
+        return jsonify({"error": "Missing email or password"}), 400
+
     user = UserService.get_user_by_email(email)
+
     if not user or not Auth.verify_password(password, user.password_hash):
         return jsonify({"error": "Invalid credentials"}), 401
 
-    # Discord fallback
-    if not user.discord_username:
-        user.discord_username = user.username
-        db.session.commit()
+    try:
+        # Discord fallback
+        if not user.discord_username:
+            user.discord_username = user.username
+            db.session.commit()
 
-    token = Auth.create_token(user.id)
-    return jsonify({
-        "token": token,
-        "user": {
-            "id": user.id,
-            "email": user.email,
-            "username": user.username,
-            "discord_username": user.discord_username
-        }
-    })
+        token = Auth.create_token(user.id)
+
+        return jsonify({
+            "token": token,
+            "user": {
+                "id": user.id,
+                "email": user.email,
+                "username": user.username,
+                "discord_username": user.discord_username
+            }
+        }), 200
+
+    except Exception:
+        db.session.rollback()
+        return jsonify({"error": "Server error"}), 500
 
 
+# ---------------------------------------------------------
+# AUTH / ME
+# ---------------------------------------------------------
 @bp.get("/me")
 def me():
     auth_header = request.headers.get("Authorization")
@@ -69,6 +106,7 @@ def me():
     if not auth_header:
         return jsonify({"error": "Missing token"}), 401
 
+    # Accept both "Bearer <token>" and "<token>"
     if auth_header.startswith("Bearer "):
         token = auth_header.split(" ", 1)[1]
     else:
@@ -84,14 +122,19 @@ def me():
     if not user:
         return jsonify({"error": "User not found"}), 401
 
-    # Discord fallback
-    if not user.discord_username:
-        user.discord_username = user.username
-        db.session.commit()
+    try:
+        # Discord fallback
+        if not user.discord_username:
+            user.discord_username = user.username
+            db.session.commit()
 
-    return jsonify({
-        "id": user.id,
-        "email": user.email,
-        "username": user.username,
-        "discord_username": user.discord_username
-    })
+        return jsonify({
+            "id": user.id,
+            "email": user.email,
+            "username": user.username,
+            "discord_username": user.discord_username
+        }), 200
+
+    except Exception:
+        db.session.rollback()
+        return jsonify({"error": "Server error"}), 500
