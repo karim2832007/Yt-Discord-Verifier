@@ -1,7 +1,8 @@
-from flask import Blueprint, request, jsonify, redirect, session
+from flask import Blueprint, request, jsonify, redirect
 from datetime import datetime, timedelta
 from app.extensions import db
 from app.models.key import Key
+from app.security.auth import Auth
 import uuid
 import time
 
@@ -73,9 +74,21 @@ def create_key_route():
     # -----------------------------------------------------
     # GET: Auto-generate quick key + redirect WITH KEY
     # -----------------------------------------------------
-    if "user" in session and session["user"].get("id"):
-        user_id = session["user"]["id"]
-    else:
+
+    # Extract user_id from JWT token
+    auth_header = request.headers.get("Authorization")
+    user_id = None
+
+    if auth_header:
+        if auth_header.startswith("Bearer "):
+            token = auth_header.split(" ", 1)[1]
+        else:
+            token = auth_header
+
+        user_id = Auth.verify_token(token)
+
+    # If no token → fallback to ?user_id= or anonymous
+    if not user_id:
         user_id = request.args.get("user_id") or "anonymous"
 
     key = create_key_record(user_id=user_id)
