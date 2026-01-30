@@ -5,7 +5,7 @@ class Config:
     SECRET_KEY = os.environ.get("SECRET_KEY", "dev-secret")
     DEBUG = True
 
-    # SQLAlchemy (required for your new key system)
+    # SQLAlchemy
     SQLALCHEMY_DATABASE_URI = os.environ.get(
         "DATABASE_URL",
         "sqlite:///database.db"
@@ -14,3 +14,8 @@ class Config:
 
     # Optional: allow larger JSON payloads
     JSON_AS_ASCII = False
+
+    # ⭐ SESSION SETTINGS (required for cross-domain login)
+    SESSION_COOKIE_DOMAIN = os.environ.get("SESSION_COOKIE_DOMAIN", None)
+    SESSION_COOKIE_SAMESITE = os.environ.get("SESSION_COOKIE_SAMESITE", "Lax")
+    SESSION_COOKIE_SECURE = bool(int(os.environ.get("SESSION_COOKIE_SECURE", "0")))
