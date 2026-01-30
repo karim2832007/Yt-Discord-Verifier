@@ -5,11 +5,11 @@ from app.extensions import db
 def create_app():
     app = Flask(__name__, static_folder="static")
 
-    # Load config
+    # Load config FIRST
     app.config.from_object("app.config.Config")
 
-    # Enable CORS
-    CORS(app)
+    # Enable CORS WITH credentials
+    CORS(app, supports_credentials=True)
 
     # Initialize SQLAlchemy
     db.init_app(app)
@@ -60,7 +60,6 @@ def create_app():
     # CREATE TABLES
     # -------------------------
     with app.app_context():
-        # Import ALL models so SQLAlchemy knows them
         from app.models.user import User
         from app.models.device import Device
         from app.models.key import Key
@@ -68,7 +67,7 @@ def create_app():
         from app.models.nsfw import NSFWToken
         from app.models.admin import AdminLog
         from app.models.game import Game
-        from app.models.game_download_link import GameDownloadLink  # NEW
+        from app.models.game_download_link import GameDownloadLink
 
         db.create_all()
 
