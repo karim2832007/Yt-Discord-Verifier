@@ -1,5 +1,6 @@
 from flask import Blueprint, jsonify
 from app.services.user_service import UserService
+from flask import session
 
 bp = Blueprint("user", __name__)
 
