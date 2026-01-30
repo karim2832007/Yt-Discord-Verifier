@@ -1,5 +1,6 @@
 from flask import Blueprint, request, jsonify
 from app.services.lootlabs_service import LootLabsService
+from flask import session
 
 bp = Blueprint("lootlabs", __name__)
 
