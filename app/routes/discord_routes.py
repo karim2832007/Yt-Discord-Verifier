@@ -1,6 +1,8 @@
 from flask import Blueprint, request, jsonify
 from app.services.discord_service import DiscordService
 from app.services.user_service import UserService
+from flask import session
+
 
 bp = Blueprint("discord", __name__)
 
