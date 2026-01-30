@@ -1,5 +1,6 @@
 from flask import Blueprint, jsonify
 from app.services.game_service import GameService
+from flask import session
 
 bp = Blueprint("games", __name__)
 
