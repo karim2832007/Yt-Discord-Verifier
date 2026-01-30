@@ -5,6 +5,7 @@ from app.models.key import Key
 from app.security.auth import Auth
 import uuid
 import time
+from flask import session
 
 bp = Blueprint("key_routes", __name__)
 
