@@ -1,11 +1,10 @@
-from flask import Blueprint, request, jsonify, redirect
+from flask import Blueprint, request, jsonify, redirect, session
 from datetime import datetime, timedelta
 from app.extensions import db
 from app.models.key import Key
 from app.security.auth import Auth
 import uuid
 import time
-from flask import session
 
 bp = Blueprint("key_routes", __name__)
 
@@ -76,26 +75,31 @@ def create_key_route():
     # GET: Auto-generate quick key + redirect WITH KEY
     # -----------------------------------------------------
 
-    # 1. Try Authorization header
-    auth_header = request.headers.get("Authorization")
-    token = None
+    # ⭐ 1. FIRST: Try Flask session (best method)
+    if "user" in session and session["user"].get("id"):
+        user_id = session["user"]["id"]
 
-    if auth_header:
-        if auth_header.startswith("Bearer "):
-            token = auth_header.split(" ", 1)[1]
-        else:
-            token = auth_header
+    else:
+        # ⭐ 2. Try Authorization header
+        auth_header = request.headers.get("Authorization")
+        token = None
 
-    # 2. If missing, try ?token= in URL
-    if not token:
-        token = request.args.get("token")
+        if auth_header:
+            if auth_header.startswith("Bearer "):
+                token = auth_header.split(" ", 1)[1]
+            else:
+                token = auth_header
 
-    # 3. Decode token → user_id
-    user_id = Auth.verify_token(token) if token else None
+        # ⭐ 3. Try ?token= in URL
+        if not token:
+            token = request.args.get("token")
 
-    # 4. If still no user → fallback
-    if not user_id:
-        user_id = request.args.get("user_id") or "anonymous"
+        # ⭐ 4. Decode token → user_id
+        user_id = Auth.verify_token(token) if token else None
+
+        # ⭐ 5. Final fallback
+        if not user_id:
+            user_id = request.args.get("user_id") or "anonymous"
 
     key = create_key_record(user_id=user_id)
 
