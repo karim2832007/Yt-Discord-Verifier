@@ -1,4 +1,4 @@
-from flask import Blueprint, request, jsonify
+from flask import Blueprint, request, jsonify, session
 from app.services.user_service import UserService
 from app.security.auth import Auth
 from app.extensions import db
@@ -17,11 +17,9 @@ def register():
     username = data.get("username")
     password = data.get("password")
 
-    # Basic validation
     if not email or not username or not password:
         return jsonify({"error": "Missing required fields"}), 400
 
-    # Email already exists
     if UserService.get_user_by_email(email):
         return jsonify({"error": "Email already exists"}), 400
 
@@ -29,10 +27,12 @@ def register():
         password_hash = Auth.hash_password(password)
         user = UserService.create_user(email, username, password_hash)
 
-        # Discord fallback
         if not user.discord_username:
             user.discord_username = username
             db.session.commit()
+
+        # ⭐ ADD THIS
+        session["user"] = { "id": user.id }
 
         token = Auth.create_token(user.id)
 
@@ -74,10 +74,12 @@ def login():
         return jsonify({"error": "Invalid credentials"}), 401
 
     try:
-        # Discord fallback
         if not user.discord_username:
             user.discord_username = user.username
             db.session.commit()
+
+        # ⭐ ADD THIS
+        session["user"] = { "id": user.id }
 
         token = Auth.create_token(user.id)
 
@@ -94,6 +96,7 @@ def login():
     except Exception:
         db.session.rollback()
         return jsonify({"error": "Server error"}), 500
+
 
 
 # ---------------------------------------------------------
