@@ -1,4 +1,4 @@
-from flask import Blueprint, request, jsonify, redirect, session
+from flask import Blueprint, request, jsonify, session, make_response
 from datetime import datetime, timedelta
 from app.extensions import db
 from app.models.key import Key
@@ -72,15 +72,14 @@ def create_key_route():
 
 
     # -----------------------------------------------------
-    # GET: Auto-generate quick key + redirect WITH KEY
+    # GET: Auto-generate quick key + SHOW HTML PAGE
     # -----------------------------------------------------
 
-    # ⭐ 1. FIRST: Try Flask session (best method)
+    # Try session first
     if "user" in session and session["user"].get("id"):
         user_id = session["user"]["id"]
-
     else:
-        # ⭐ 2. Try Authorization header
+        # Try Authorization header
         auth_header = request.headers.get("Authorization")
         token = None
 
@@ -90,66 +89,73 @@ def create_key_route():
             else:
                 token = auth_header
 
-        # ⭐ 3. Try ?token= in URL
+        # Try ?token=
         if not token:
             token = request.args.get("token")
 
-        # ⭐ 4. Decode token → user_id
+        # Decode token
         user_id = Auth.verify_token(token) if token else None
 
-        # ⭐ 5. Final fallback
+        # Final fallback
         if not user_id:
-            user_id = request.args.get("user_id") or "anonymous"
+            user_id = "anonymous"
 
     key = create_key_record(user_id=user_id)
 
-    return redirect(f"https://gaming-mods.com/#/game-key?key={key.key_value}")
+    # -----------------------------------------------------
+    # Return a simple HTML page with the key
+    # -----------------------------------------------------
+    html = f"""
+    <html>
+        <head>
+            <title>Your Game Key</title>
+            <style>
+                body {{
+                    background: #0d0d0d;
+                    color: #00eaff;
+                    font-family: Arial, sans-serif;
+                    text-align: center;
+                    padding-top: 80px;
+                }}
+                .box {{
+                    background: #111;
+                    padding: 30px;
+                    border-radius: 10px;
+                    display: inline-block;
+                    border: 2px solid #00eaff;
+                }}
+                .key {{
+                    font-size: 28px;
+                    font-weight: bold;
+                    margin-top: 20px;
+                }}
+                .note {{
+                    margin-top: 20px;
+                    font-size: 16px;
+                    color: #ccc;
+                }}
+                a {{
+                    color: #00eaff;
+                    text-decoration: none;
+                    font-weight: bold;
+                }}
+            </style>
+        </head>
+        <body>
+            <div class="box">
+                <h1>Your Key Has Been Generated</h1>
+                <div class="key">{key.key_value}</div>
+                <div class="note">
+                    Copy your key now.  
+                    After that, you can return to the main site.
+                </div>
+                <br>
+                <a href="https://gaming-mods.com">Go back to Gaming-Mods</a>
+            </div>
+        </body>
+    </html>
+    """
 
-
-# ---------------------------------------------------------
-# DELETE KEY
-# ---------------------------------------------------------
-@bp.delete("/<string:key_value>")
-def delete_key(key_value):
-    key = Key.query.filter_by(key_value=key_value).first()
-
-    if not key:
-        return jsonify({"ok": False, "message": "Key not found"}), 404
-
-    try:
-        db.session.delete(key)
-        db.session.commit()
-    except Exception as e:
-        db.session.rollback()
-        return jsonify({"ok": False, "message": str(e)}), 500
-
-    return jsonify({"ok": True, "message": "Key deleted"}), 200
-
-
-# ---------------------------------------------------------
-# LIST KEYS FOR USER
-# ---------------------------------------------------------
-@bp.get("/user/<int:user_id>")
-def get_user_keys(user_id):
-    keys = Key.query.filter_by(user_id=user_id).all()
-
-    return jsonify({
-        "ok": True,
-        "keys": [k.to_record() for k in keys]
-    }), 200
-
-
-# ---------------------------------------------------------
-# GET INFO FOR A SINGLE KEY
-# ---------------------------------------------------------
-@bp.get("/info/<string:key_value>")
-def get_key_info(key_value):
-    key = Key.query.filter_by(key_value=key_value).first()
-
-    if not key:
-        return jsonify({"ok": False, "message": "Key not found"}), 404
-
-    return jsonify({
-        "ok": True,
-        "key": key.to_record()
-    }), 200
+    response = make_response(html)
+    response.headers["Content-Type"] = "text/html"
+    return response
