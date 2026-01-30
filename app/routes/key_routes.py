@@ -91,7 +91,7 @@ def create_key_route():
     key = create_key_record(user_id=user_id)
 
     # Redirect to your frontend page
-    return redirect("/game-key")
+    return redirect("https://gaming-mods.com/#/game-key")
 
 
 # ---------------------------------------------------------
