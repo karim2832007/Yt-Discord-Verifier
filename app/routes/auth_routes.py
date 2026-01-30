@@ -15,10 +15,27 @@ def register():
         return jsonify({"error": "Email already exists"}), 400
 
     password_hash = Auth.hash_password(password)
+
+    # Create user
     user = UserService.create_user(email, username, password_hash)
 
+    # If Discord username is empty, use the normal username
+    if not user.discord_username:
+        user.discord_username = username
+        UserService.save(user)
+
     token = Auth.create_token(user.id)
-    return jsonify({"token": token, "user": {"id": user.id, "email": user.email}})
+
+    return jsonify({
+        "token": token,
+        "user": {
+            "id": user.id,
+            "email": user.email,
+            "username": user.username,
+            "discord_username": user.discord_username
+        }
+    })
+
 
 @bp.post("/login")
 def login():
@@ -30,8 +47,23 @@ def login():
     if not user or not Auth.verify_password(password, user.password_hash):
         return jsonify({"error": "Invalid credentials"}), 401
 
+    # If Discord username is missing (old accounts), fill it
+    if not user.discord_username:
+        user.discord_username = user.username
+        UserService.save(user)
+
     token = Auth.create_token(user.id)
-    return jsonify({"token": token, "user": {"id": user.id, "email": user.email}})
+
+    return jsonify({
+        "token": token,
+        "user": {
+            "id": user.id,
+            "email": user.email,
+            "username": user.username,
+            "discord_username": user.discord_username
+        }
+    })
+
 
 @bp.get("/me")
 def me():
@@ -40,9 +72,6 @@ def me():
     if not auth_header:
         return jsonify({"error": "Missing token"}), 401
 
-    # Accept both:
-    # "Bearer <token>"
-    # "<token>"
     if auth_header.startswith("Bearer "):
         token = auth_header.split(" ", 1)[1]
     else:
@@ -54,8 +83,18 @@ def me():
         return jsonify({"error": "Invalid token"}), 401
 
     user = UserService.get_user_by_id(user_id)
+
+    if not user:
+        return jsonify({"error": "User not found"}), 401
+
+    # Ensure discord_username always exists
+    if not user.discord_username:
+        user.discord_username = user.username
+        UserService.save(user)
+
     return jsonify({
         "id": user.id,
         "email": user.email,
-        "username": user.username
+        "username": user.username,
+        "discord_username": user.discord_username
     })
