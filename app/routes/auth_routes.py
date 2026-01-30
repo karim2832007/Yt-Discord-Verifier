@@ -1,6 +1,7 @@
 from flask import Blueprint, request, jsonify
 from app.services.user_service import UserService
 from app.security.auth import Auth
+from app.extensions import db
 
 bp = Blueprint("auth", __name__)
 
@@ -15,17 +16,14 @@ def register():
         return jsonify({"error": "Email already exists"}), 400
 
     password_hash = Auth.hash_password(password)
-
-    # Create user
     user = UserService.create_user(email, username, password_hash)
 
-    # If Discord username is empty, use the normal username
+    # Discord fallback
     if not user.discord_username:
         user.discord_username = username
-        UserService.save(user)
+        db.session.commit()
 
     token = Auth.create_token(user.id)
-
     return jsonify({
         "token": token,
         "user": {
@@ -47,13 +45,12 @@ def login():
     if not user or not Auth.verify_password(password, user.password_hash):
         return jsonify({"error": "Invalid credentials"}), 401
 
-    # If Discord username is missing (old accounts), fill it
+    # Discord fallback
     if not user.discord_username:
         user.discord_username = user.username
-        UserService.save(user)
+        db.session.commit()
 
     token = Auth.create_token(user.id)
-
     return jsonify({
         "token": token,
         "user": {
@@ -87,10 +84,10 @@ def me():
     if not user:
         return jsonify({"error": "User not found"}), 401
 
-    # Ensure discord_username always exists
+    # Discord fallback
     if not user.discord_username:
         user.discord_username = user.username
-        UserService.save(user)
+        db.session.commit()
 
     return jsonify({
         "id": user.id,
