@@ -13,35 +13,6 @@ from core.admin_override import global_override, admin_overrides
 
 validate_bp = Blueprint("validate", __name__)
 
-# -------------------------------------------------
-# REAL CLIENT IP (MATCHES PHP getRealIp EXACTLY)
-# -------------------------------------------------
-def get_real_ip(req):
-    # Cloudflare
-    cf = req.headers.get("CF-Connecting-IP")
-    if cf:
-        return cf.strip()
-
-    # PHP → Python forwarded header
-    xr = req.headers.get("X-Real-IP")
-    if xr:
-        return xr.strip()
-
-    # Proxy chain
-    xff = req.headers.get("X-Forwarded-For")
-    if xff:
-        return xff.split(",")[0].strip()
-
-    # Fallback
-    ip = req.remote_addr or "unknown"
-
-    # Normalize IPv6-mapped IPv4 (::ffff:79.7.157.3)
-    if ip.startswith("::ffff:"):
-        ip = ip.replace("::ffff:", "")
-
-    return ip
-
-
 @validate_bp.route("/validate_key", methods=["GET", "POST"])
 @validate_bp.route("/validate_key/<path:key_to_validate>", methods=["GET"])
 @validate_bp.route("/validate_key/<did>/<path:key_to_validate>", methods=["GET"])
@@ -62,93 +33,71 @@ def validate_key(key_to_validate=None, did=None):
         key_to_validate = unquote_plus(str(key_to_validate)).strip()
         now = time.time()
 
+        # -------------------------------------------------
         # ADMIN OVERRIDE
+        # -------------------------------------------------
         if global_override or (did and admin_overrides.get(did)):
             expires_at = float(now + LEGACY_LIMIT_SECONDS)
-            response = {
+            return jsonify({
                 "ok": True,
                 "valid": True,
                 "message": "ADMIN OVERRIDE ACTIVE",
                 "expires_at": expires_at,
                 "expiry_iso": datetime.utcfromtimestamp(expires_at).isoformat(),
                 "expires_in": int(expires_at - now)
-            }
+            }), 200
 
-        else:
-            # LOOKUP FROM MYSQL
-            record = _get_key_from_store(key_to_validate)
-            if not record:
-                return jsonify({"ok": False, "valid": False, "message": "Invalid or unknown key"}), 400
+        # -------------------------------------------------
+        # LOOKUP FROM MYSQL
+        # -------------------------------------------------
+        record = _get_key_from_store(key_to_validate)
+        if not record:
+            return jsonify({"ok": False, "valid": False, "message": "Invalid or unknown key"}), 400
 
-            # -------------------------------------------------
-            # REAL CLIENT IP (PHP → Python)
-            # -------------------------------------------------
-            request_ip = get_real_ip(request)
-            print("Client IP received:", request_ip)
+        # -------------------------------------------------
+        # REMOVE IP CHECK — ALWAYS SKIP IT
+        # -------------------------------------------------
+        # key_ip = record.get("created_ip")
+        # request_ip = "ignored"
+        # (No comparison, no 403)
 
-            key_ip = record.get("created_ip")
+        # -------------------------------------------------
+        # EXPIRY PARSE
+        # -------------------------------------------------
+        try:
+            rec_expires_at = float(record.get("expires_at") or 0)
+        except Exception:
+            return jsonify({"ok": False, "valid": False, "message": "Malformed expiry"}), 500
 
-            # -------------------------------------------------
-            # AUTO‑ASSIGN IP IF NULL
-            # -------------------------------------------------
-            if not key_ip or key_ip.strip() == "":
-                try:
-                    db = get_db()
-                    cursor = db.cursor()
-                    cursor.execute("""
-                        UPDATE generated_keys
-                        SET created_ip = %s
-                        WHERE key_value = %s
-                    """, (request_ip, key_to_validate))
-                    db.commit()
-                    cursor.close()
-                    db.close()
-                    print("Assigned new IP to key:", request_ip)
-                except Exception as e:
-                    print("Failed to assign IP:", e)
-
-                key_ip = request_ip
-
-            # -------------------------------------------------
-            # IP MISMATCH CHECK (STRICT)
-            # -------------------------------------------------
-            if key_ip != request_ip:
-                return jsonify({
-                    "ok": False,
-                    "valid": False,
-                    "message": "Sharing keys is forbidden",
-                    "request_ip": request_ip,
-                    "key_ip": key_ip
-                }), 403
-
-            # EXPIRY PARSE
+        # -------------------------------------------------
+        # EXPIRED
+        # -------------------------------------------------
+        if now > rec_expires_at:
             try:
-                rec_expires_at = float(record.get("expires_at") or 0)
+                burn_key(key_to_validate)
             except Exception:
-                return jsonify({"ok": False, "valid": False, "message": "Malformed expiry"}), 500
+                pass
 
-            # EXPIRED
-            if now > rec_expires_at:
-                try:
-                    burn_key(key_to_validate)
-                except Exception:
-                    pass
+            return jsonify({"ok": False, "valid": False, "message": "Key expired"}), 410
 
-                return jsonify({"ok": False, "valid": False, "message": "Key expired"}), 410
+        # -------------------------------------------------
+        # STATUS CHECK
+        # -------------------------------------------------
+        status = record.get("status", "active")
+        valid = (status == "active")
 
-            status = record.get("status", "active")
-            valid = (status == "active")
+        response = {
+            "ok": True,
+            "valid": valid,
+            "message": "Key is valid" if valid else "Key is revoked",
+            "expires_at": rec_expires_at,
+            "expiry_iso": datetime.utcfromtimestamp(rec_expires_at).isoformat(),
+            "expires_in": int(rec_expires_at - now)
+        }
 
-            response = {
-                "ok": True,
-                "valid": valid,
-                "message": "Key is valid" if valid else "Key is revoked",
-                "expires_at": rec_expires_at,
-                "expiry_iso": datetime.utcfromtimestamp(rec_expires_at).isoformat(),
-                "expires_in": int(rec_expires_at - now)
-            }
-
+        # -------------------------------------------------
         # FIELD FILTERING
+        # -------------------------------------------------
         fields_param = request.args.get("fields")
         if fields_param:
             requested = {f.strip() for f in fields_param.split(",")}
