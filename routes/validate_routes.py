@@ -13,6 +13,35 @@ from core.admin_override import global_override, admin_overrides
 
 validate_bp = Blueprint("validate", __name__)
 
+# -------------------------------------------------
+# REAL CLIENT IP (MATCHES PHP getRealIp EXACTLY)
+# -------------------------------------------------
+def get_real_ip(req):
+    # Cloudflare
+    cf = req.headers.get("CF-Connecting-IP")
+    if cf:
+        return cf.strip()
+
+    # PHP → Python forwarded header
+    xr = req.headers.get("X-Real-IP")
+    if xr:
+        return xr.strip()
+
+    # Proxy chain
+    xff = req.headers.get("X-Forwarded-For")
+    if xff:
+        return xff.split(",")[0].strip()
+
+    # Fallback
+    ip = req.remote_addr or "unknown"
+
+    # Normalize IPv6-mapped IPv4 (::ffff:79.7.157.3)
+    if ip.startswith("::ffff:"):
+        ip = ip.replace("::ffff:", "")
+
+    return ip
+
+
 @validate_bp.route("/validate_key", methods=["GET", "POST"])
 @validate_bp.route("/validate_key/<path:key_to_validate>", methods=["GET"])
 @validate_bp.route("/validate_key/<did>/<path:key_to_validate>", methods=["GET"])
@@ -52,11 +81,9 @@ def validate_key(key_to_validate=None, did=None):
                 return jsonify({"ok": False, "valid": False, "message": "Invalid or unknown key"}), 400
 
             # -------------------------------------------------
-            # REAL CLIENT IP (from PHP → Python)
+            # REAL CLIENT IP (PHP → Python)
             # -------------------------------------------------
-            real_ip = request.headers.get("X-Real-IP")
-            request_ip = real_ip or request.remote_addr or "unknown"
-
+            request_ip = get_real_ip(request)
             print("Client IP received:", request_ip)
 
             key_ip = record.get("created_ip")
@@ -80,10 +107,10 @@ def validate_key(key_to_validate=None, did=None):
                 except Exception as e:
                     print("Failed to assign IP:", e)
 
-                key_ip = request_ip  # treat as assigned
+                key_ip = request_ip
 
             # -------------------------------------------------
-            # IP MISMATCH CHECK
+            # IP MISMATCH CHECK (STRICT)
             # -------------------------------------------------
             if key_ip != request_ip:
                 return jsonify({
